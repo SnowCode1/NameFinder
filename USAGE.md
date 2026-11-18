@@ -167,7 +167,7 @@ namefinder rank-final --refresh
 |---|---|---|
 | `--limit N` | All stages | Process only the first N candidates (useful for testing) |
 | `--refresh` | All stages | Ignore cached answers and re-evaluate |
-| `--clear` | `score` | Wipe all cached scores from database without re-scoring |
+| `--clear` | `score` | Back up the database to `data/backups/`, then delete all scores and coined words |
 | `--free-domains-only` | `score` | Score only candidates that have at least one verified free domain |
 | `--mode {auto,root,brand}` | `score` | Scoring rubric: `root` (base potency for coining), `brand` (standalone name), `auto` (default) |
 | `--backend {local,openrouter}` | `score`, `coin` | Scoring engine (`local` for LM Studio, `openrouter` for cloud) |
@@ -181,10 +181,27 @@ namefinder rank-final --refresh
 | `--top N`, `-n N` | `top` | Number of ranked candidates to display (default: 25) |
 | `--free-domains` | `top` | Filter display to candidates with at least one free domain |
 | `--clean` | `top` | Filter display to candidates clear of trademark conflicts |
+| `--bases-only` | `top` | Hide coined names; show dictionary base words only |
+| `--top-n N` / `--samples N` | `refine` | How many top coined words to review, and independent reviews per word (defaults: 100 / 3) |
 | `--model MODEL` | `score`, `rank-final` | Override the model ID |
 | `--concurrency N` | `score` | Number of parallel requests (default: 6) |
 | `--skip-llm` | `rank-final` | Write reports from cached SQLite data without calling an LLM |
 | `--db PATH` | All stages | Override SQLite database file path |
+
+---
+
+## Spoken-Name Review (`namefinder refine`)
+
+Pass 1 (`score` / `coin`) ranks everything cheaply. Pass 2 reviews only the best coined words: the model splits each word into syllables, respells it, writes how a listener would spell it after hearing it once, and lists embarrassing sound-alikes. Each word is reviewed several times and the answers are averaged, then blended with the code-side checks in `namefinder/phonetics.py`.
+
+```powershell
+namefinder coin --continuous --backend local     # pass 1 (builds the pool)
+namefinder refine --top-n 100 --samples 3        # pass 2 on the best 100 coined words
+namefinder refine --free-domains-only --backend openrouter --model <stronger-model>
+namefinder top --free-domains                    # shows syllables / say-aloud / sound-alike risks
+```
+
+Pass 1 already applies a pronounceability gate and a small penalty to names that are just a generic prefix (`meta`, `pan`, `ultra`, ...) on a dictionary word. Tune both in `namefinder/config.py` (`PHONETIC_WEIGHT`, `GENERIC_PREFIX_PENALTY`). Override the review prompt with `prompts/refine_prompt.md` and `prompts/refine_user_prompt.md` (gitignored).
 
 ---
 

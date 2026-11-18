@@ -182,7 +182,7 @@ def build_rich_table(
     )
 
     t.add_column("#", justify="right", style="bold cyan", no_wrap=True, min_width=3)
-    t.add_column("Candidate", style="bold white", no_wrap=True, min_width=12)
+    t.add_column("Candidate", style="bold white", no_wrap=True, min_width=14)
     t.add_column("Score", justify="center", no_wrap=True, min_width=7)
     t.add_column("Fit", justify="center", no_wrap=True, min_width=5)
     t.add_column("Nat", justify="center", no_wrap=True, min_width=5)
@@ -203,9 +203,13 @@ def build_rich_table(
         fit_text = f"{fit:.2f}"
         nat_text = f"{nat:.2f}"
 
+        sound = r.get("say_aloud") or r.get("syllables")
+        cand_cell = f"[bold white]{word}[/]"
+        if sound and sound != word:
+            cand_cell += f"\n[dim]{sound}[/]"
         row_cells = [
             str(i),
-            f"[bold white]{word}[/]",
+            cand_cell,
             score_text,
             fit_text,
             nat_text,
@@ -218,6 +222,9 @@ def build_rich_table(
         if show_reasoning:
             why = r.get("why") or ""
             why_not = r.get("why_not") or ""
+            misheard = r.get("misheard_as")
+            if misheard:
+                why_not = f"{why_not}; may sound like: {misheard}" if why_not else f"may sound like: {misheard}"
             if why and why_not:
                 reason = f"{why} [dim][Risk: {why_not}][/]"
             elif why:
@@ -263,7 +270,7 @@ def show_live_top_10(
     """Fetch and display the live top 10 candidates directly from SQLite."""
     if free_domains_only:
         sql = """
-            SELECT s.word, s.composite, s.fit, s.natural, s.why, s.why_not,
+            SELECT s.word, s.composite, s.fit, s.natural, s.why, s.why_not, s.syllables, s.say_aloud, s.misheard_as,
                    GROUP_CONCAT(d.tld || ':' || d.status) AS domain_state
             FROM scores s
             JOIN domains d ON d.word = s.word
@@ -276,7 +283,7 @@ def show_live_top_10(
         rows = conn.execute(sql, (qversion, limit)).fetchall()
     else:
         sql = """
-            SELECT s.word, s.composite, s.fit, s.natural, s.why, s.why_not,
+            SELECT s.word, s.composite, s.fit, s.natural, s.why, s.why_not, s.syllables, s.say_aloud, s.misheard_as,
                    (SELECT GROUP_CONCAT(d.tld || ':' || d.status) FROM domains d WHERE d.word = s.word) AS domain_state
             FROM scores s
             WHERE s.qversion = ?
@@ -324,7 +331,7 @@ class LiveScoringDashboard:
         with db.session(self.db_path) as conn:
             if self.free_domains_only:
                 sql = """
-                    SELECT s.word, s.composite, s.fit, s.natural, s.why, s.why_not,
+                    SELECT s.word, s.composite, s.fit, s.natural, s.why, s.why_not, s.syllables, s.say_aloud, s.misheard_as,
                            GROUP_CONCAT(d.tld || ':' || d.status) AS domain_state
                     FROM scores s
                     JOIN domains d ON d.word = s.word
@@ -337,7 +344,7 @@ class LiveScoringDashboard:
                 return conn.execute(sql, (self.qversion, limit)).fetchall()
             else:
                 sql = """
-                    SELECT s.word, s.composite, s.fit, s.natural, s.why, s.why_not,
+                    SELECT s.word, s.composite, s.fit, s.natural, s.why, s.why_not, s.syllables, s.say_aloud, s.misheard_as,
                            (SELECT GROUP_CONCAT(d.tld || ':' || d.status) FROM domains d WHERE d.word = s.word) AS domain_state
                     FROM scores s
                     WHERE s.qversion = ?
