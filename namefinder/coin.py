@@ -11,6 +11,7 @@ import asyncio
 import math
 import random
 import re
+import statistics
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -18,7 +19,7 @@ from typing import Iterable, Sequence
 
 from tqdm import tqdm
 
-from . import budget, config, console, db, domains, score
+from . import budget, config, console, db, domains, phonetics, score
 
 PREFIXES = (
     "in", "re", "con", "syn", "per", "pro", "meta", "omni",
@@ -176,7 +177,7 @@ def generate_variations(
     # Filter and prune
     valid: set[str] = set()
     for cand in out:
-        if cand != w and is_pronounceable(cand, min_len=min_len, max_len=max_len):
+        if cand != w and acceptable(cand, min_len=min_len, max_len=max_len):
             valid.add(cand)
 
     return valid
@@ -207,12 +208,149 @@ def coin_candidates(
         ts = _now()
         for w in novel:
             conn.execute(
-                "INSERT OR IGNORE INTO words (word, pos, zipf, source, created_at) VALUES (?, 'n', 3.0, 'coined', ?)",
+                "INSERT OR IGNORE INTO words (word, pos, zipf, source, created_at, engine) "
+                "VALUES (?, 'n', 3.0, 'coined', ?, 'rules')",
                 (w, ts),
             )
         conn.commit()
 
     return novel
+
+
+def _is_real_word(w: str) -> bool:
+    """True for ordinary English words (a fused name that equals one is not a coinage)."""
+    try:
+        from wordfreq import zipf_frequency
+    except ImportError:  # pragma: no cover
+        return False
+    return zipf_frequency(w, "en") >= 2.0
+
+
+def acceptable(word: str, min_len: int = 5, max_len: int = 10) -> bool:
+    """Quality gate for any coined candidate: phonotactics, pronounceability, no crude fragments."""
+    if not is_pronounceable(word, min_len=min_len, max_len=max_len):
+        return False
+    w = word.lower()
+    if re.search(r"ii|uu|yy", w) or _is_real_word(w):
+        return False
+    if any(b in w for b in config.COIN_BLOCK_SUBSTRINGS):
+        return False
+    if any(w.startswith(e) or w.endswith(e) for e in config.COIN_BLOCK_EDGES):
+        return False
+    return phonetics.analyze(w).score >= config.COIN_MIN_PHONETIC
+
+
+def _seams(w: str) -> list[int]:
+    """Cut points where a vowel meets a consonant (or vice versa)."""
+    return [k for k in range(1, len(w)) if (w[k - 1] in "aeiouy") != (w[k] in "aeiouy")]
+
+
+_DOUBLES = frozenset("tt ss ll nn mm pp rr ff dd bb gg zz".split())
+_CODA_PAIRS = frozenset("ct st nt rt lt nd ld rd ng nk sk sp mp ft pt xt lp lk rk rm rn rl lm ln rp rc sh ch th ph".split())
+
+
+def _seam_ok(cand: str, k: int) -> bool:
+    """Is the join at index k natural? Rejects vowel doubling and unspeakable consonant meetings."""
+    left, right = cand[k - 1], cand[k]
+    if left in "aeiouy" and right in "aeiouy":
+        return left != right
+    # consonant run that contains the seam
+    i = k
+    while i > 0 and cand[i - 1] not in "aeiouy":
+        i -= 1
+    j = k
+    while j < len(cand) and cand[j] not in "aeiouy":
+        j += 1
+    run = cand[i:j]
+    if len(run) <= 1:
+        return True
+    if len(run) == 2:
+        return run in _DOUBLES or run in _CODA_PAIRS or run in phonetics.VALID_ONSETS
+    return run[-2:] in phonetics.VALID_ONSETS or run[-3:] in phonetics.VALID_ONSETS
+
+
+def splice_candidates(a: str, b: str) -> dict[str, bool]:
+    """Ways to fuse two words at vowel/consonant seams. Maps candidate -> True if the join shares letters.
+
+    The head is a proper prefix of one word and the tail a suffix (or all) of the other, so both
+    parents are shortened, each keeps at least 40% of its letters, and the seam alternates sounds.
+    """
+    out: dict[str, bool] = {}
+    for x, y in ((a, b), (b, a)):
+        # shared-sound joins: the end of x is the start of y (lattice + ice -> lattice)
+        for ol in range(4, 1, -1):
+            if x.endswith(y[:ol]) and len(y) > ol:
+                out[x + y[ol:]] = True
+        heads = [x[:k] for k in _seams(x) if len(x[:k]) >= max(3, math.ceil(0.4 * len(x)))]
+        tails = [y] + [y[k:] for k in _seams(y)]
+        for head in heads:
+            for tail in tails:
+                if len(tail) >= max(3, math.ceil(0.4 * len(y))):
+                    if _seam_ok(head + tail, len(head)):
+                        out.setdefault(head + tail, False)
+    for w in (a, b):
+        out.pop(w, None)
+    return out
+
+
+def best_splice(a: str, b: str, min_len: int, max_len: int, top: int = 3) -> str | None:
+    """Pick a fused name that reads well; choose randomly among the best few for variety."""
+    scored: list[tuple[float, str]] = []
+    for cand, overlap in splice_candidates(a, b).items():
+        if not acceptable(cand, min_len=min_len, max_len=max_len):
+            continue
+        # keep both parents recognisable: at least 3 letters of each should survive
+        if not (cand.startswith(a[:3]) or cand.startswith(b[:3])):
+            continue
+        score_ = phonetics.analyze(cand).score + (0.15 if overlap else 0.0)
+        scored.append((score_, cand))
+    if not scored:
+        return None
+    scored.sort(reverse=True)
+    return random.choice(scored[:top])[1]
+
+
+ENGINES = ("prefix", "suffix", "trunc", "portmanteau", "vowel")
+
+
+def learn_weights(conn, qversion: str) -> tuple[dict[str, float], dict[str, float]]:
+    """Engine and portmanteau-partner weights from the composites earlier coined words earned.
+
+    Means are shrunk toward the overall mean (COIN_LEARN_PRIOR pseudo-observations), so
+    sparse data stays near uniform. Returns ({}, {}) until scored coined words exist.
+    """
+    rows = conn.execute(
+        """
+        SELECT w.engine, w.parents, s.composite FROM words w
+        JOIN scores s ON s.word = w.word AND s.qversion = ?
+        WHERE w.source = 'coined' AND w.engine IS NOT NULL
+        """,
+        (qversion,),
+    ).fetchall()
+    if not rows:
+        return {}, {}
+
+    by_engine: dict[str, list[float]] = {}
+    by_partner: dict[str, list[float]] = {}
+    for r in rows:
+        by_engine.setdefault(r["engine"], []).append(r["composite"])
+        if r["engine"] == "portmanteau" and r["parents"] and "," in r["parents"]:
+            by_partner.setdefault(r["parents"].split(",")[1], []).append(r["composite"])
+
+    overall = statistics.fmean(r["composite"] for r in rows)
+    if overall <= 0:
+        return {}, {}
+    k = config.COIN_LEARN_PRIOR
+
+    def shrunk(vals: list[float]) -> float:
+        return (sum(vals) + overall * k) / (len(vals) + k)
+
+    raw = {e: (shrunk(by_engine.get(e, [])) / overall) ** 2 for e in ENGINES}
+    total = sum(raw.values())
+    explore = config.COIN_EXPLORE
+    engine_w = {e: (1 - explore) * v / total + explore / len(ENGINES) for e, v in raw.items()}
+    partner_w = {p: (shrunk(v) / overall) ** 2 for p, v in by_partner.items()}
+    return engine_w, partner_w
 
 
 def sample_base_words(ranked_words: Sequence[Any], count: int = 15, half_life: float = 25.0) -> list[str]:
@@ -239,13 +377,21 @@ def sample_one_variation(
     min_len: int = 5,
     max_len: int = 10,
     max_attempts: int = 30,
-) -> tuple[str, str] | None:
-    """Sample one base word and generate a single valid, pronounceable variation."""
+    engine_weights: dict[str, float] | None = None,
+    partner_weights: dict[str, float] | None = None,
+) -> tuple[str, str, str, str | None] | None:
+    """Sample one base word and generate a single valid variation.
+
+    Returns (candidate, base, engine, partner); partner is only set for portmanteaus.
+    """
     words = [r["word"] if hasattr(r, "__getitem__") else str(r) for r in ranked_words]
+    ew = [(engine_weights or {}).get(e, 1.0) for e in ENGINES]
+    pw = partner_weights or {}
     for _ in range(max_attempts):
         base = random.choices(words, weights=weights, k=1)[0]
-        engine = random.choice(["prefix", "suffix", "trunc", "portmanteau", "vowel"])
+        engine = random.choices(ENGINES, weights=ew, k=1)[0]
         cand = None
+        other = None
 
         if engine == "prefix":
             p = random.choice(PREFIXES)
@@ -268,17 +414,12 @@ def sample_one_variation(
             cand = base[:4] + random.choice(("x", "on", "is", "ix", "or", "ar", "el", "ic", "al"))
 
         elif engine == "portmanteau":
-            other = random.choice(CONCEPT_ROOTS) if random.random() < 0.5 else random.choices(words, weights=weights, k=1)[0]
+            if random.random() < 0.5:
+                other = random.choices(CONCEPT_ROOTS, weights=[pw.get(r, 1.0) for r in CONCEPT_ROOTS], k=1)[0]
+            else:
+                other = random.choices(words, weights=weights, k=1)[0]
             if other != base:
-                for ol in range(4, 1, -1):
-                    if other.endswith(base[:ol]):
-                        cand = other + base[ol:]
-                        break
-                    elif base.endswith(other[:ol]):
-                        cand = base + other[ol:]
-                        break
-                if not cand and len(base) >= 4 and len(other) >= 4:
-                    cand = base[:3] + other[len(other) // 2 :]
+                cand = best_splice(base, other, min_len, max_len)
 
         elif engine == "vowel":
             vowels = [i for i, ch in enumerate(base) if ch in "aeiou"]
@@ -286,8 +427,8 @@ def sample_one_variation(
                 idx = random.choice(vowels)
                 cand = base[:idx] + random.choice("aeiou") + base[idx + 1 :]
 
-        if cand and cand != base and is_pronounceable(cand, min_len=min_len, max_len=max_len):
-            return cand, base
+        if cand and cand != base and acceptable(cand, min_len=min_len, max_len=max_len):
+            return cand, base, engine, other
 
     return None
 
@@ -299,21 +440,32 @@ def coin_stream_batch(
     min_len: int = 5,
     max_len: int = 10,
     db_path=None,
+    learned: tuple[dict[str, float], dict[str, float]] | None = None,
 ) -> list[tuple[str, str]]:
     """Sample batch_size novel variations, where each variation is its own independent base sample."""
     weights = [2.0 ** (-i / half_life) for i in range(len(ranked_words))]
+    with db.session(db_path) as conn:
+        if learned is None:
+            learned = learn_weights(conn, config.QUESTION_VERSION)
+        known = {r[0] for r in conn.execute("SELECT word FROM words")}
+    engine_w, partner_w = learned
     pairs: list[tuple[str, str]] = []
+    provenance: dict[str, tuple[str, str]] = {}
     seen = set()
 
     attempts = 0
     while len(pairs) < batch_size and attempts < batch_size * 25:
         attempts += 1
-        res = sample_one_variation(ranked_words, weights, min_len=min_len, max_len=max_len)
+        res = sample_one_variation(
+            ranked_words, weights, min_len=min_len, max_len=max_len,
+            engine_weights=engine_w, partner_weights=partner_w,
+        )
         if res:
-            cand, base = res
-            if cand not in seen:
+            cand, base, engine, other = res
+            if cand not in seen and cand not in known:
                 seen.add(cand)
                 pairs.append((cand, base))
+                provenance[cand] = (engine, f"{base},{other}" if other else base)
 
     if not pairs:
         return []
@@ -332,9 +484,11 @@ def coin_stream_batch(
 
         ts = _now()
         for cand, base in novel_pairs:
+            engine, parents = provenance[cand]
             conn.execute(
-                "INSERT OR IGNORE INTO words (word, pos, zipf, source, created_at) VALUES (?, 'n', 3.0, 'coined', ?)",
-                (cand, ts),
+                "INSERT OR IGNORE INTO words (word, pos, zipf, source, created_at, engine, parents) "
+                "VALUES (?, 'n', 3.0, 'coined', ?, ?, ?)",
+                (cand, ts, engine, parents),
             )
         conn.commit()
 
@@ -418,8 +572,13 @@ def run_continuous_loop(
                 break
 
             # 2. Draw novel variations where every single variation is an independent sample with replacement
+            with db.session(db_path) as conn:
+                learned = learn_weights(conn, qversion)
+            if learned[0]:
+                print("[learn] engine weights: " + "  ".join(f"{e}={w:.2f}" for e, w in learned[0].items()))
             novel_pairs = coin_stream_batch(
-                ranked, batch_size=batch, half_life=half_life, min_len=min_len, max_len=max_len, db_path=db_path
+                ranked, batch_size=batch, half_life=half_life, min_len=min_len, max_len=max_len,
+                db_path=db_path, learned=learned,
             )
             if not novel_pairs:
                 print(f"[Cycle {cycle}] Retrying candidate generation...")

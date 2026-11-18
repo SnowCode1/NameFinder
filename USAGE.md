@@ -122,6 +122,12 @@ namefinder coin --no-domains --no-score --limit 50
 
 ---
 
+### How Coined Names Are Generated
+
+Each candidate comes from one of five engines (prefix, suffix, truncation, portmanteau, vowel shift) applied to a base word sampled by rank. Portmanteaus fuse two words at vowel/consonant seams, so both parents are shortened (each keeps at least 40% of its letters) and the join alternates sounds. Every candidate passes one quality gate before it is stored or scored: pronounceability (`phonetics.py`, floor `COIN_MIN_PHONETIC`), no real English words, no crude fragments (`COIN_BLOCK_SUBSTRINGS`), and not already in the database.
+
+Each coined word records its engine and parents. Between cycles the loop re-weights engines and portmanteau partner roots by the scores their earlier words earned (shrunk toward the overall mean, with 30% kept uniform so no engine starves), and prints the engine weights each cycle.
+
 ## View Rankings and Status in CLI
 
 ```powershell

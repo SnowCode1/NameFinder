@@ -117,6 +117,12 @@ CREATE TABLE IF NOT EXISTS final_tags (
 """
 
 
+# Columns added to `words` after the first release (name, SQL type).
+WORD_EXTRA_COLUMNS = (
+    ("engine", "TEXT"),    # coining engine that produced the word
+    ("parents", "TEXT"),   # "base" or "base,partner" the word was derived from
+)
+
 # Columns added to `scores` after the first release (name, SQL type).
 SCORE_EXTRA_COLUMNS = (
     ("why", "TEXT"),
@@ -138,12 +144,13 @@ def connect(path: Path | str | None = None) -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys=ON")
     conn.executescript(SCHEMA)
     # Additive migrations for databases created before these columns existed
-    for col, decl in SCORE_EXTRA_COLUMNS:
-        try:
-            conn.execute(f"ALTER TABLE scores ADD COLUMN {col} {decl}")
-            conn.commit()
-        except sqlite3.OperationalError:
-            pass  # column already present
+    for table, columns in (("scores", SCORE_EXTRA_COLUMNS), ("words", WORD_EXTRA_COLUMNS)):
+        for col, decl in columns:
+            try:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+                conn.commit()
+            except sqlite3.OperationalError:
+                pass  # column already present
     return conn
 
 
