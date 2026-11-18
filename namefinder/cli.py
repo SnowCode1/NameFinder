@@ -6,7 +6,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import config, db
+from . import config, console, db
 
 
 def _add_common(p: argparse.ArgumentParser) -> None:
@@ -185,26 +185,19 @@ def cmd_top(db_path, limit: int = 25, only_free: bool = False, only_clean: bool 
             filter_desc.append("clean trademarks only")
         filters_str = f" ({', '.join(filter_desc)})" if filter_desc else ""
 
-        print(f"\n=== NameFinder Rankings: Top {len(items)}{filters_str} ===\n")
+        title = f"NameFinder Rankings: Top {len(items)}{filters_str}"
         if not items:
-            print("No candidates match the specified criteria.")
-            print("Run `namefinder score` or `namefinder check-domains` first.\n")
+            print(f"\n{console.yellow('No candidates match the specified criteria.')}")
+            print(f"Run {console.b_cyan('namefinder score')} or {console.b_cyan('namefinder coin')} first.\n")
             return
 
-        header = f"{'#':<3} {'Candidate':<12} {'Score':<7} {'Domains':<26} {'Trademark':<11} {'Why & Risk Assessment'}"
-        print(header)
-        print("-" * len(header))
-        for i, item in enumerate(items, 1):
-            comp_str = f"{item['composite']:.3f}" if item['composite'] is not None else "-"
-            why_text = item.get("why") or "-"
-            why_not = item.get("why_not")
-            reasoning = f"{why_text} [Risk: {why_not}]" if why_not else why_text
-
-            print(
-                f"{i:<3} {item['word']:<12} {comp_str:<7} "
-                f"{item['domains'][:25]:<26} {item['trademark']:<11} {reasoning}"
-            )
-        print()
+        console.print_leaderboard(
+            items,
+            title=title,
+            limit=limit,
+            show_domains=True,
+            show_reasoning=True,
+        )
 
 
 def cmd_status(db_path) -> None:
@@ -213,31 +206,40 @@ def cmd_status(db_path) -> None:
             return conn.execute(sql, args).fetchone()[0]
 
         qversion = config.QUESTION_VERSION
-        print(f"\n=== NameFinder Pipeline Status ===")
-        print(f"database : {db_path or config.DB_PATH}")
-        print(f"words    : {one('SELECT COUNT(*) FROM words'):,} vocabulary words prepared")
-        print(f"scores   : {one('SELECT COUNT(*) FROM scores WHERE qversion = ?', qversion):,} scored candidates (version: {qversion})")
-        print(f"domains  : {one('SELECT COUNT(*) FROM domains'):,} checked, "
-              f"{one('SELECT COUNT(*) FROM domains WHERE status = ?', 'available'):,} available")
-        print(f"marks    : {one('SELECT COUNT(*) FROM mark_checks')} screened, "
-              f"{one('SELECT COUNT(*) FROM mark_hits')} hits, "
-              f"{one('SELECT COUNT(*) FROM ipgod_marks')} IP Australia entries")
-        print(f"repos    : {one('SELECT COUNT(*) FROM repo_checks')} PyPI / GitHub screens")
-        print(f"final    : {one('SELECT COUNT(*) FROM final_tags')} tagged shortlist words")
+        db_file = db_path or config.DB_PATH
 
-        print("\nPipeline Funnel:")
-        print(f"  1. Prepared words      : {one('SELECT COUNT(*) FROM words'):,}")
-        print(f"  2. Scored words        : {one('SELECT COUNT(*) FROM scores WHERE qversion = ?', qversion):,}")
-        print(f"  3. With a free domain  : {len(db.words_passing_domains(conn, qversion)):,}")
-        print(f"  4. Clean trademarks    : {len(db.words_passing_trademarks(conn, qversion)):,}")
+        print(f"\n{console.bold(console.b_cyan('=== NameFinder Pipeline Dashboard ==='))}")
+        print(f"Database : {console.dim(str(db_file))}")
+        print(f"Version  : {console.b_cyan(qversion)}")
 
-        # Quick preview of top 5
+        n_words = one('SELECT COUNT(*) FROM words')
+        n_scores = one('SELECT COUNT(*) FROM scores WHERE qversion = ?', qversion)
+        n_domains = one('SELECT COUNT(*) FROM domains')
+        n_free = one('SELECT COUNT(*) FROM domains WHERE status = ?', 'available')
+        n_marks = one('SELECT COUNT(*) FROM mark_checks')
+        n_hits = one('SELECT COUNT(*) FROM mark_hits')
+        n_repos = one('SELECT COUNT(*) FROM repo_checks')
+        n_final = one('SELECT COUNT(*) FROM final_tags')
+
+        print(f"Words    : {console.b_white(f'{n_words:,}')} vocabulary words prepared")
+        print(f"Scores   : {console.b_green(f'{n_scores:,}')} scored candidates")
+        print(f"Domains  : {console.b_white(f'{n_domains:,}')} checked, {console.b_green(f'{n_free:,}')} free")
+        print(f"Marks    : {console.b_white(f'{n_marks:,}')} screened, {console.yellow(f'{n_hits:,}')} hits")
+        print(f"Repos    : {console.b_white(f'{n_repos:,}')} PyPI / GitHub screens")
+        print(f"Final    : {console.b_cyan(f'{n_final:,}')} tagged shortlist candidates")
+
+        passing_doms = len(db.words_passing_domains(conn, qversion))
+        passing_marks = len(db.words_passing_trademarks(conn, qversion))
+
+        print(f"\n{console.bold('Pipeline Funnel:')}")
+        print(f"  1. Prepared words      : {console.b_white(f'{n_words:,}')}")
+        print(f"  2. Scored words        : {console.b_cyan(f'{n_scores:,}')}")
+        print(f"  3. With a free domain  : {console.b_green(f'{passing_doms:,}')}")
+        print(f"  4. Clean trademarks    : {console.b_green(f'{passing_marks:,}')}")
+
         top5 = db.get_candidates_summary(conn, qversion, limit=5)
         if top5:
-            print("\nTop Candidates Preview:")
-            for i, r in enumerate(top5, 1):
-                print(f"  {i}. {r['word']:<10} score={r['composite']:.3f}  domains={r['domains']}  marks={r['trademark']}")
-        print()
+            console.print_leaderboard(top5, title="Top 5 Candidates Preview", limit=5)
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -16,57 +16,45 @@ from typing import Any, Iterable
 import httpx
 from tqdm import tqdm
 
-from . import config, db, net
+from . import config, console, db, net
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-OPENROUTER_SYSTEM_PROMPT = (
-    "You are an elite brand naming strategist for a high-craft technology startup.\n"
-    "Product: A high-speed image provenance engine and LLM agent that helps journalists and fact-checkers "
-    "trace a photo to its first upload, connect its copies, and understand HOW it spread.\n\n"
-    "THE 'WHY' NARRATIVE BRIDGE RULE (MANDATORY):\n"
-    "A great brand name must have an intuitive conceptual bridge to what the product actually does. "
-    "If someone asks 'Why are you called [Name]?', there must be a natural, brilliant answer:\n"
-    "- Weaving & Structure (Loom, Lattice, Mesh, Strand, Nexus, Relay, Tensor) -> 'Because we weave scattered copies into one family tree.'\n"
-    "- Depth & Investigation (Fathom, Trace, Inspect, Probe, Sift, Spectrum, Glean, Insight) -> 'Because we dig beneath the latest repost to the first upload.'\n"
-    "- Optics & Illumination (Prism, Beacon, Lens, Clarity, Focus) -> 'Because we bring the original image back into focus.'\n"
-    "- Ancestry & Provenance (Lineage, Origin, Root, Genesis, Heritage) -> 'Because we trace the lineage of every photo and every edit.'\n"
-    "- Rigorous Logic & Proof (Axiom, Vector, Tenet, Calculus, Topology) -> 'Because provenance is a chain of evidence, link by link.'\n\n"
-    "CRITICAL 'WHY NOT' & PHONETIC COLLISION RULES (MANDATORY):\n"
-    "For EVERY candidate, you must ruthlessly identify the 'WHY NOT' risk:\n"
-    "1. Homophone & Typo Trap: Does the word sound like, or look like a typo of, an ordinary word?\n"
-    "   - 'Fathor' sounds like 'Father' or an awkward typo. Instant cringe. Unusable as a tech product.\n"
-    "   - 'Atlis' looks like a misspelled 'Atlas'. Confusing.\n"
-    "   - If a candidate has a homophone or typo trap, CAP 'fit' at <= 0.25 and 'natural' at <= 0.30!\n"
-    "2. Embarrassing / Crude / Awkward sounds: Does it contain awkward syllables or sound like an insult/body part over voice/phone?\n"
-    "3. Nonsense Coining: Does it sound like a clumsy chimera word rather than a sleek tech brand?\n\n"
-    "THE DISJOINTED METAPHOR TRAP (PENALIZE):\n"
-    "Do NOT reward words just because they sound 'tactile' or 'grounded' if the metaphor makes zero sense for an image provenance tool!\n"
-    "- REJECT/PENALIZE random rocks, minerals, and geology (quartz, quartzon, garnet, basalt, granite, marble, terrain, glacier, oxide): Being a hard rock has no relationship to images, provenance, or tracing!\n"
-    "- REJECT random animals or household items (badger, couch, kettle).\n"
-    "- REJECT flat generic infrastructure or verbs (road, hear, board, space, street).\n\n"
+DEFAULT_SYSTEM_PROMPT = (
+    "You are an expert brand naming strategist for a high-craft modern technology product.\n"
+    "Product: A fast, reliable software tool designed for clarity, deep insight, and quiet intellectual utility.\n\n"
+    "THE 'WHY' NARRATIVE BRIDGE RULE:\n"
+    "A great brand name must have an intuitive conceptual bridge to what the product does.\n"
+    "- Structure & Foundation (Loom, Lattice, Mesh, Nexus, Core, Grid) -> Evokes interconnected reliability.\n"
+    "- Optics & Focus (Prism, Lens, Beacon, Clarity, Ray) -> Evokes bringing signal out of noise.\n"
+    "- Depth & Exploration (Fathom, Trace, Probe, Vector, Compass) -> Evokes thorough investigation.\n"
+    "- Logic & Precision (Axiom, Tenet, Calculus, Syntax) -> Evokes mathematical elegance.\n\n"
+    "CRITICAL 'WHY NOT' & PHONETIC COLLISION RULES:\n"
+    "For EVERY candidate, identify brand risks:\n"
+    "1. Homophone & Typo Trap: Avoid words that look like misspelled common words or sound awkward.\n"
+    "2. Unflattering mishearings: Avoid words with crude or embarrassing phonetic overlaps.\n"
+    "3. Clumsy neologisms: Avoid chimera words that feel unnatural to speak aloud.\n\n"
     "SCORING CALIBRATION:\n"
-    "- 0.80 to 0.95 (EXCELLENT): Natural conceptual bridge to images/provenance AND minimal/clean 'why_not' risk (Loom, Lattice, Fathom, Prism, Lineage, Axiom, Trace, Mesh).\n"
-    "- 0.50 to 0.75 (PLAUSIBLE): Good investigative or structural metaphor (Inspectral, Compass, Canvas, Relay, Probe, Strand, Anchor).\n"
-    "- 0.20 to 0.45 (DISJOINTED / WEAK): Disjointed metaphors with no image/provenance connection, or words with obvious typo/homophone traps (Fathor, Atlis, Quartz, Garnet, Terrain).\n"
-    "- 0.00 to 0.20 (REJECT): Flat generic words, basic bodily verbs, or prepositions (Road, Hear, Board, Rest, Phone, Held, Behind).\n\n"
+    "- 0.80 to 0.95 (EXCELLENT): Natural, dignified metaphor with clean pronunciation and zero cringe.\n"
+    "- 0.50 to 0.75 (PLAUSIBLE): Good functional metaphor, easily spellable.\n"
+    "- 0.20 to 0.45 (WEAK): Weak metaphor or slight awkwardness.\n"
+    "- 0.00 to 0.20 (REJECT): Mundane everyday nouns, prepositions, or flat bodily verbs.\n\n"
     "EARLY-OUT RULE (CRITICAL FOR SPEED):\n"
-    "- If a word is an obvious non-starter (flat noun, preposition, body verb, or disjointed rock/geology like 'street', 'behind', 'born', 'road', 'quartz'), immediately EARLY-OUT:\n"
-    "  set 'fit' <= 0.2, 'why': '', and 'why_not': 3-5 words (e.g. 'Flat transit infrastructure' or 'Disjointed mineral metaphor').\n"
-    "  Do NOT write long sentences for rejected words!\n"
-    "- ONLY for viable candidates (fit >= 0.5 like 'lattice', 'fathom', 'prism', 'axiom'), write a single crisp sentence (< 10 words) for 'why' and 'why_not'."
+    "- If a word is an obvious non-starter (flat noun, preposition, body verb), immediately EARLY-OUT:\n"
+    "  set 'fit' <= 0.2, 'why': '', and 'why_not': 3-5 words explaining why.\n"
+    "- ONLY for viable candidates (fit >= 0.5), write a single crisp sentence (< 10 words) for 'why' and 'why_not'."
 )
 
-OPENROUTER_USER_PROMPT = """Evaluate each candidate word for this image provenance startup brand.
+DEFAULT_USER_PROMPT = """Evaluate each candidate word for this software product brand.
 
 Candidates: {words}
 
 For each candidate, provide exact numerical scores using the narrative bridge, collision, and early-out rubric:
 - "word": the candidate word exactly as given
-- "fit": float between 0.0 and 1.0 (<= 0.2 for non-starters; >= 0.8 only for strong image/provenance metaphors)
+- "fit": float between 0.0 and 1.0 (<= 0.2 for non-starters; >= 0.8 only for strong conceptual alignment)
 - "natural": float between 0.0 and 1.0
 - "spellable": float between 0.0 and 1.0
 - "memorable": float between 0.0 and 4.0
@@ -78,6 +66,9 @@ For each candidate, provide exact numerical scores using the narrative bridge, c
 
 Return a JSON array of objects, one per candidate, in the same order.
 Return ONLY the raw JSON array. No markdown fences, no prose."""
+
+OPENROUTER_SYSTEM_PROMPT = config.load_prompt("system_prompt.md", DEFAULT_SYSTEM_PROMPT)
+OPENROUTER_USER_PROMPT = config.load_prompt("user_prompt.md", DEFAULT_USER_PROMPT)
 
 
 def composite(
@@ -265,6 +256,8 @@ async def score_words_openrouter(
                 conn.commit()
                 if pbar:
                     pbar.update(len(chunk))
+                # Render live top 10 leaderboard directly during slow scoring runs
+                console.show_live_top_10(conn, qversion, title=f"Live Top 10 Scored Candidates ({done}/{len(words)} processed)")
                 await asyncio.sleep(1.0)
 
     return done
@@ -370,15 +363,4 @@ def run(
             print("\n[score] Scoring paused by user (Ctrl+C). Progress safely saved to database.")
 
     with db.session(db_path) as conn:
-        rows = db.ranked_words(conn, qversion, limit=top_n or config.SCORE_TOP_N)
-        print(f"\n--- Top {min(sample, len(rows))} Ranked Candidates ---\n")
-        header = f"{'#':<3} {'Word':<10} {'Score':<7} {'Fit':<5} {'Nat':<5} {'Spell':<5} {'Mem':<4} {'Neg':<5} {'Taken':<5}"
-        print(header)
-        print("-" * len(header))
-        for i, r in enumerate(rows[:sample], 1):
-            print(
-                f"{i:<3} {r['word']:<10} {r['composite']:.3f}   "
-                f"{r['fit']:.2f}  {r['natural']:.2f}  {r['spellable']:.2f}  "
-                f"{r['memorable']:.1f}  {r['neg']:.2f}  {r['taken']:.2f}"
-            )
-        print()
+        console.show_live_top_10(conn, qversion, title=f"Top {sample} Scored Candidates", limit=sample)

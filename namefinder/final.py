@@ -18,29 +18,29 @@ from tqdm import tqdm
 
 from . import config, db, net
 
-SYSTEM_PROMPT = (
-    "You are an expert brand naming strategist for high-craft technology startups.\n"
-    "Product: A high-speed image provenance engine and LLM agent for tracing photos to their source, "
-    "connecting every copy and edit, and uncovering how an image spread.\n"
-    "Target aesthetic: calm, formidable, quiet intellectual utility — like Obsidian, Stripe, Linear, "
-    "or Raycast. No corporate hype, no cheesy AI clichés (-ify, -ia).\n"
-    "THE NARRATIVE BRIDGE RULE: Reward names with an intuitive conceptual bridge to images, lineage, "
-    "investigation, depth, illumination, or logical proof (e.g. Loom, Lattice, Fathom, Prism, Lineage, Axiom, Trace). "
-    "Penalize disjointed metaphors with zero image/provenance connection (rocks/minerals like Quartz, Garnet; terrain words; random animals)."
+DEFAULT_FINAL_SYSTEM_PROMPT = (
+    "You are an expert brand naming strategist for modern technology products.\n"
+    "Product: A fast, reliable software tool designed for clarity, deep insight, and quiet intellectual utility.\n"
+    "Target aesthetic: calm, formidable, quiet utility — like Obsidian, Stripe, Linear, or Raycast. No corporate hype, no cheesy clichés.\n"
+    "THE NARRATIVE BRIDGE RULE: Reward names with an intuitive conceptual bridge to clarity, structure, focus, depth, or logical precision. "
+    "Penalize disjointed or overly generic metaphors."
 )
 
-USER_TEMPLATE = """Score each candidate name for this image provenance product.
+DEFAULT_FINAL_USER_TEMPLATE = """Score each candidate name for this software product.
 
 Candidates: {words}
 
 Return a JSON array, one object per candidate, in the same order, with exactly these keys:
   "word": the candidate, unchanged
-  "fit": 1-5, how strong is the intuitive narrative bridge to images, lineage, depth, or investigation (5 for Loom/Lattice/Fathom/Prism/Lineage, 3 for plausible metaphors like Inspectral/Canvas, 1-2 for rocks/minerals/geology/generic words)
+  "fit": 1-5, how strong is the intuitive conceptual bridge to clarity, structure, focus, or utility
   "memorability": 1-5, how easily it is remembered and repeated after one hearing
   "why": at most 12 words on the conceptual bridge (or why it makes no sense)
   "risk": at most 8 words on the main brand risk, or "" if none
 
 Return only the JSON array. No prose, no code fences."""
+
+SYSTEM_PROMPT = config.load_prompt("final_system_prompt.md", DEFAULT_FINAL_SYSTEM_PROMPT)
+USER_TEMPLATE = config.load_prompt("final_user_prompt.md", DEFAULT_FINAL_USER_TEMPLATE)
 
 
 def _now() -> str:
