@@ -16,7 +16,7 @@ from typing import Iterable, Sequence
 
 from tqdm import tqdm
 
-from . import config, db, domains, score
+from . import config, console, db, domains, score
 
 PREFIXES = (
     "in", "re", "con", "syn", "per", "pro", "meta", "omni",
@@ -28,12 +28,13 @@ SUFFIXES = (
     "os", "ic", "us", "an", "ax", "ox", "io", "ia",
 )
 
-CONCEPT_ROOTS = (
-    "inspect", "causal", "vector", "tracer", "matrix", "prism",
+DEFAULT_CONCEPT_ROOTS = (
+    "inspect", "vector", "tracer", "matrix", "prism",
     "logic", "nexus", "vertex", "axiom", "focus", "graph",
-    "atomic", "signal", "cipher", "tensor", "beacon", "optic",
-    "quantum", "syntax", "lattice",
+    "signal", "cipher", "tensor", "beacon", "optic",
+    "syntax", "lattice", "core", "flow", "fathom", "loom",
 )
+CONCEPT_ROOTS = config.load_concept_roots(DEFAULT_CONCEPT_ROOTS)
 
 VOWELS = set("aeiouy")
 CONSONANTS = set("bcdfghjklmnpqrstvwxz")
@@ -428,19 +429,13 @@ def run_continuous_loop(
                         api_url=api_url, api_key=api_key, batch_size=batch_size
                     ))
 
-                # Print discovery alert
+                # Render live Top 10 leaderboard for discovered free-domain brands
                 with db.session(db_path) as conn:
-                    for fw in free_words:
-                        sc = conn.execute(
-                            "SELECT composite, fit, why, why_not FROM scores WHERE word = ? AND qversion = ?",
-                            (fw, qversion)
-                        ).fetchone()
-                        if sc and sc["composite"] >= 0.70:
-                            print(f"\n  >>> [TOP DISCOVERY] {fw:<12} Score: {sc['composite']:.3f} (Fit: {sc['fit']:.2f})")
-                            print(f"      Why:  {sc['why']}")
-                            if sc['why_not']:
-                                print(f"      Risk: {sc['why_not']}")
-                            print()
+                    console.show_live_top_10(
+                        conn, qversion,
+                        title=f"Continuous Discovery: Top 10 Winners with Free Domains (Cycle {cycle})",
+                        free_domains_only=True,
+                    )
 
             print("-" * 70)
 
@@ -544,26 +539,13 @@ def run(
                 api_url=api_url, api_key=api_key, batch_size=batch_size
             ))
 
-    print("\n--- Top Coined Candidates ---")
     with db.session(db_path) as conn:
-        top_coined = conn.execute(
-            """
-            SELECT s.word, s.composite, s.fit, s.why, s.why_not
-            FROM scores s
-            JOIN words w ON w.word = s.word
-            WHERE w.source = 'coined' AND s.qversion = ?
-            ORDER BY s.composite DESC
-            LIMIT 15
-            """,
-            (qversion,),
-        ).fetchall()
-        if top_coined:
-            for i, r in enumerate(top_coined, 1):
-                why = r["why"] or "-"
-                risk = f" [Risk: {r['why_not']}]" if r["why_not"] else ""
-                print(f"  {i:<2}. {r['word']:<12} score={r['composite']:.3f} (fit: {r['fit']:.2f})  {why}{risk}")
-        else:
-            print("  (Run `namefinder top` to inspect all rankings)")
+        console.show_live_top_10(
+            conn, qversion,
+            title="Top Coined Candidates with Free Domains",
+            limit=15,
+            free_domains_only=True,
+        )
 
-    print("\nRun `namefinder top --free-domains` to view full domain and trademark details.\n")
+    print("Run `namefinder top --free-domains` to view full domain and trademark details.\n")
     return novel_words

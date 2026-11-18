@@ -29,9 +29,42 @@ _load_env()
 DATA_DIR = ROOT / "data"
 RESULTS_DIR = ROOT / "results"
 IPGOD_DIR = DATA_DIR / "ipgod"
+PROMPTS_DIR = ROOT / "prompts"
 DB_PATH = Path(os.getenv("NAMEFINDER_DB") or (DATA_DIR / "namefinder.db"))
 if not DB_PATH.is_absolute():
     DB_PATH = ROOT / DB_PATH
+
+
+def load_prompt(filename: str, default: str) -> str:
+    """Load prompt from prompts/<filename>, falling back to .example, then default."""
+    p = PROMPTS_DIR / filename
+    if p.exists():
+        try:
+            return p.read_text(encoding="utf-8").strip()
+        except OSError:
+            pass
+    p_ex = PROMPTS_DIR / (filename.replace(".md", ".example.md").replace(".txt", ".example.txt"))
+    if p_ex.exists():
+        try:
+            return p_ex.read_text(encoding="utf-8").strip()
+        except OSError:
+            pass
+    return default.strip()
+
+
+def load_concept_roots(default: tuple[str, ...]) -> tuple[str, ...]:
+    """Load concept roots from prompts/concept_roots.txt or fallback."""
+    p = PROMPTS_DIR / "concept_roots.txt"
+    if not p.exists():
+        p = PROMPTS_DIR / "concept_roots.example.txt"
+    if p.exists():
+        try:
+            lines = [line.strip().lower() for line in p.read_text(encoding="utf-8").splitlines() if line.strip()]
+            if lines:
+                return tuple(lines)
+        except OSError:
+            pass
+    return default
 
 
 # --- secrets ---------------------------------------------------------------

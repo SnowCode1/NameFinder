@@ -44,3 +44,9 @@ desktop.ini
 
 # Corpora / Downloaded models
 nltk_data/
+
+# Private brand definitions & calibrated prompts
+prompts/*.md
+prompts/*.txt
+!prompts/*.example.md
+!prompts/*.example.txt
