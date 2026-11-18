@@ -169,6 +169,7 @@ namefinder rank-final --refresh
 | `--refresh` | All stages | Ignore cached answers and re-evaluate |
 | `--clear` | `score` | Wipe all cached scores from database without re-scoring |
 | `--free-domains-only` | `score` | Score only candidates that have at least one verified free domain |
+| `--mode {auto,root,brand}` | `score` | Scoring rubric: `root` (base potency for coining), `brand` (standalone name), `auto` (default) |
 | `--backend {local,openrouter}` | `score`, `coin` | Scoring engine (`local` for LM Studio, `openrouter` for cloud) |
 | `--continuous`, `-c` | `coin` | Run autonomous generation, RDAP check, and scoring loop |
 | `--half-life FLOAT` | `coin` | Rank falloff half-life for base word sampling (default: `25.0`) |

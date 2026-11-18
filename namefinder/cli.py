@@ -77,6 +77,8 @@ Scoring Examples:
     _add_common(p2)
     p2.add_argument("--backend", choices=["openrouter", "local", "lmstudio", "typesafe"], default=None,
                     help="scoring backend (default: openrouter; 'local' for LM Studio)")
+    p2.add_argument("--mode", choices=["auto", "root", "brand"], default="auto",
+                    help="scoring mode: 'root' for base conceptual potency, 'brand' for standalone names (default: auto)")
     p2.add_argument("--clear", action="store_true",
                     help="wipe all cached scores from the database without re-scoring")
     p2.add_argument("--free-domains-only", action="store_true",
@@ -257,7 +259,7 @@ def main(argv: list[str] | None = None) -> int:
             score.run(limit=args.limit, top_n=args.top_n, refresh=args.refresh,
                       concurrency=args.concurrency, model=args.model, db_path=args.db,
                       sample=args.sample, backend=args.backend, free_domains_only=free_doms,
-                      clear_only=clear_flag)
+                      clear_only=clear_flag, mode=getattr(args, "mode", "auto"))
         elif args.cmd == "check-domains":
             from . import domains
             domains.run(limit=args.limit, refresh=args.refresh, db_path=args.db, top_n=args.top_n)
