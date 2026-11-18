@@ -67,11 +67,48 @@ For each candidate, provide exact numerical scores using the narrative bridge, c
 Return a JSON array of objects, one per candidate, in the same order.
 Return ONLY the raw JSON array. No markdown fences, no prose."""
 
-OPENROUTER_SYSTEM_PROMPT = config.load_prompt("system_prompt.md", DEFAULT_SYSTEM_PROMPT)
+DEFAULT_ROOT_SYSTEM_PROMPT = (
+    "You are an expert morphological and lexical root analyst for a software naming engine.\n"
+    "Product domain: Modern technology, developer utilities, and reliable data platforms.\n\n"
+    "TASK: Evaluate whether each candidate word is a POTENT CONCEPTUAL ROOT / BASE to coin brand names from.\n"
+    "NOTE: Do NOT penalize a word for being an everyday noun or flat as a standalone name! Common, clean roots often form the most intuitive brand compounds.\n\n"
+    "ROOT SCORING RUBRIC:\n"
+    "- fit (float 0.0 to 1.0): Conceptual potency for structure, clarity, focus, depth, or utility.\n"
+    "  - 0.85-0.98 (HIGH POTENCY): Strong, evocative roots (core, flow, node, link, prism, axis, lattice, trace, forge, cause, root).\n"
+    "  - 0.50-0.75 (MODERATE POTENCY): Plausible functional roots (pulse, stack, wave, grid, beacon).\n"
+    "  - 0.20-0.45 (WEAK): Weak or disjointed concepts.\n"
+    "  - 0.00-0.20 (REJECT): Mundane transit infrastructure, flat body verbs, or prepositions.\n"
+    "- natural (float 0.0 to 1.0): Morphemic flexibility — how cleanly does this word accept prefixes and suffixes?\n"
+    "- spellable (float 0.0 to 1.0): Phonetic clarity of the root.\n"
+    "- memorable (float 0.0 to 4.0): Semantic richness of the core concept.\n"
+    "- why: exactly 1 crisp phrase explaining its conceptual root potency (< 10 words).\n"
+    "- why_not: 3-5 words explaining limitations if any (leave empty for high-potency roots)."
+)
+
+ROOT_SYSTEM_PROMPT = config.load_prompt("root_prompt.md", DEFAULT_ROOT_SYSTEM_PROMPT)
+BRAND_SYSTEM_PROMPT = config.load_prompt("system_prompt.md", DEFAULT_SYSTEM_PROMPT)
+OPENROUTER_SYSTEM_PROMPT = BRAND_SYSTEM_PROMPT
 OPENROUTER_USER_PROMPT = config.load_prompt("user_prompt.md", DEFAULT_USER_PROMPT)
 
 
-def composite(
+def composite_root(
+    fit: float,
+    natural: float,
+    spellable: float,
+    memorable: float,
+    neg: float = 0.0,
+) -> float:
+    """Calculate potency score for a base word as a lexical root for coining (no common/taken penalty)."""
+    base = (
+        0.45 * fit
+        + 0.25 * natural
+        + 0.20 * (memorable / 4.0)
+        + 0.10 * spellable
+    )
+    return round(base * (1.0 - neg * 0.5), 4)
+
+
+def composite_brand(
     fit: float,
     natural: float,
     spellable: float,
@@ -80,7 +117,7 @@ def composite(
     taken: float,
     common: float,
 ) -> float:
-    """Weighted sum of judgments, gated multiplicatively by cleanliness."""
+    """Weighted sum for a standalone brand, penalizing dominant brands and generic words."""
     w = config.WEIGHTS
     novelty = (1.0 - taken * config.TAKEN_DAMP) * (1.0 - common * config.COMMON_NAME_DAMP)
     base = (
@@ -91,6 +128,10 @@ def composite(
         + w["novelty"] * novelty
     )
     return round(base * (1.0 - neg), 4)
+
+
+# Default alias
+composite = composite_brand
 
 
 def _parse_scores(content: str | None) -> list[dict[str, Any]] | None:
@@ -136,6 +177,7 @@ async def score_words_openrouter(
     dashboard: Any = None,
     api_url: str | None = None,
     api_key: str | None = None,
+    mode: str = "auto",
 ) -> int:
     url = api_url or config.OPENROUTER_URL
     key = api_key or config.secret(config.OPENROUTER_KEY_ENV)
@@ -149,13 +191,27 @@ async def score_words_openrouter(
     failed = 0
 
     with db.session(db_path) as conn:
+        if mode == "root":
+            is_root = True
+        elif mode == "brand":
+            is_root = False
+        else:
+            # auto-detect: if words are predominantly dictionary words, evaluate as roots
+            coined_count = conn.execute(
+                "SELECT COUNT(*) FROM words WHERE word IN ({}) AND source = 'coined'".format(",".join("?" * len(words))),
+                words,
+            ).fetchone()[0]
+            is_root = coined_count == 0
+
+        active_system_prompt = ROOT_SYSTEM_PROMPT if is_root else BRAND_SYSTEM_PROMPT
+
         async with net.async_client(timeout=120.0) as http:
             for idx in range(0, len(words), batch_size):
                 chunk = words[idx : idx + batch_size]
                 body = {
                     "model": model,
                     "messages": [
-                        {"role": "system", "content": OPENROUTER_SYSTEM_PROMPT},
+                        {"role": "system", "content": active_system_prompt},
                         {"role": "user", "content": OPENROUTER_USER_PROMPT.format(words=", ".join(chunk))},
                     ],
                     "temperature": 0.2,
@@ -234,6 +290,11 @@ async def score_words_openrouter(
                     else:
                         why_not_text = str(why_not_raw or "").strip()[:450] or None
 
+                    if is_root:
+                        comp_score = composite_root(fit, natural, spellable, memorable, neg)
+                    else:
+                        comp_score = composite_brand(fit, natural, spellable, memorable, neg, taken, common)
+
                     row = {
                         "word": w,
                         "qversion": qversion,
@@ -245,7 +306,7 @@ async def score_words_openrouter(
                         "neg": round(max(0.0, min(1.0, neg)), 4),
                         "taken": round(max(0.0, min(1.0, taken)), 4),
                         "common": round(max(0.0, min(1.0, common)), 4),
-                        "composite": composite(fit, natural, spellable, memorable, neg, taken, common),
+                        "composite": comp_score,
                         "why": why_text,
                         "why_not": why_not_text,
                         "raw": json.dumps({"openrouter": item}, default=str)[:20000],
@@ -275,6 +336,7 @@ def run(
     backend: str | None = None,
     free_domains_only: bool = False,
     clear_only: bool = False,
+    mode: str = "auto",
 ) -> None:
     if clear_only:
         with db.session(db_path) as conn:
@@ -364,7 +426,7 @@ def run(
                 if backend in ("openrouter", "local", "lmstudio"):
                     done = asyncio.run(score_words_openrouter(
                         todo, qversion, model, db_path, dashboard=dashboard, api_url=api_url, api_key=api_key,
-                        batch_size=batch_size
+                        batch_size=batch_size, mode=mode,
                     ))
                 else:
                     raise SystemExit(f"[score] unknown backend: {backend}. Use 'openrouter' or 'local'.")
