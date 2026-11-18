@@ -18,17 +18,31 @@ def _add_common(p: argparse.ArgumentParser) -> None:
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         prog="namefinder",
-        description="Discover and clear an original single-word brand name, stage by stage.",
+        description="Resumable brand discovery, domain screening, trademark clearance, and neologism pipeline.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Typical run:
-  namefinder prepare
-  namefinder score --limit 50            # probe score top candidates
-  namefinder score                       # full pass (cached, resumable)
-  namefinder check-domains
-  namefinder check-trademarks
-  namefinder rank-final
-  namefinder top                         # view top ranked candidates in terminal
+Standard Workflows:
+
+  1. Score Dictionary Base Words:
+     namefinder prepare                         # stage 1: ingest & filter English dictionary (~11k words)
+     namefinder score --backend local --limit 100 # score top roots locally (LM Studio on port 1234)
+     namefinder score --backend openrouter      # or score via OpenRouter cloud
+
+  2. Continuous Neologism Coining & Discovery:
+     namefinder coin -c --backend local         # autonomous stream: rank-weighted sampling -> coin -> RDAP -> score
+     namefinder coin --limit 30 --backend local # single batch of 30 independently sampled variations
+     namefinder coin --bases fathom,spectral    # coin variations from specific root words
+
+  3. Screen Domains & Trademarks Directly:
+     namefinder check-domains --top-n 500       # check .com, .dev, .app via keyless RDAP
+     namefinder check-trademarks --top-n 100    # check USPTO (Markbase), PyPI, GitHub
+
+  4. Inspect Rankings & Export:
+     namefinder top --free-domains              # view top brands with verified available domains
+     namefinder top --clean                     # view top brands clear of trademark conflicts
+     namefinder rank-final --skip-llm           # export shortlist.md / shortlist.csv to results/
+     namefinder status                          # view pipeline cache & database status
+     namefinder score --clear                   # wipe cached scores to start fresh
 """,
     )
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -41,14 +55,32 @@ Typical run:
     p1.add_argument("--no-pos", action="store_true", help="skip the WordNet noun/verb filter")
 
     # Primary Stage 2 command: score
-    p2 = sub.add_parser("score", help="stage 2: brand vibe scoring (OpenRouter / local LLM)")
+    p2 = sub.add_parser(
+        "score",
+        help="stage 2: brand resonance scoring (local LLM / OpenRouter)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Scoring Examples:
+  # Score locally using LM Studio (runs at ~2s/word with early-out):
+  namefinder score --backend local --limit 100
+
+  # Score using OpenRouter cloud:
+  namefinder score --backend openrouter --limit 100
+
+  # Score ONLY candidates that already have a free domain:
+  namefinder score --backend local --free-domains-only
+
+  # Clear cached scores without re-running:
+  namefinder score --clear
+""",
+    )
     _add_common(p2)
     p2.add_argument("--backend", choices=["openrouter", "local", "lmstudio", "typesafe"], default=None,
                     help="scoring backend (default: openrouter; 'local' for LM Studio)")
     p2.add_argument("--clear", action="store_true",
                     help="wipe all cached scores from the database without re-scoring")
     p2.add_argument("--free-domains-only", action="store_true",
-                    help="score ONLY words that already have a free domain (massive speedup!)")
+                    help="score ONLY words that already have a free domain")
     p2.add_argument("--top-n", type=int, default=config.SCORE_TOP_N,
                     help="how many top words to carry into stage 3")
     p2.add_argument("--refresh", action="store_true", help="re-score words already cached")
@@ -96,7 +128,25 @@ Typical run:
     p_top.add_argument("--clean", action="store_true",
                        help="show only candidates clear of trademark conflicts")
 
-    p_coin = sub.add_parser("coin", help="programmatically generate and clear novel brand variations")
+    p_coin = sub.add_parser(
+        "coin",
+        help="programmatically generate and clear novel brand variations",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Coining Examples:
+  # Continuous autonomous discovery loop (press Ctrl+C anytime to pause):
+  namefinder coin --continuous --backend local
+
+  # Draw 30 independent variations across full ranking (exponential decay half-life 25):
+  namefinder coin --limit 30 --backend local
+
+  # Coin from specific base words:
+  namefinder coin --bases spectral,fathom,lattice --limit 20
+
+  # Fast dry-run without RDAP domain check or LLM scoring:
+  namefinder coin --no-domains --no-score --limit 50
+""",
+    )
     _add_common(p_coin)
     p_coin.add_argument("--bases", type=str, default=None,
                         help="comma-separated base words (e.g. spectral,quartz,atlas,fathom)")

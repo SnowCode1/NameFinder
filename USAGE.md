@@ -42,145 +42,157 @@ Fill in `OPENROUTER_API_KEY` in `.env` if you want Stage 2 (scoring) and Stage 5
 
 ---
 
-## Run the pipeline
+## Standard Workflows
 
-```bash
-# Stage 1 — build the wordlist (~11,000 words, no key needed)
+### Recommended Strategy: Root Scoring + Autonomous Coining
+
+Because ~96% of pure dictionary words have their `.com` already registered, the most effective workflow is:
+1. Prepare English roots (~11,000 words).
+2. Score base roots to identify strong conceptual candidates (`lattice`, `fathom`, `lens`, `lineage`, `algebra`).
+3. Run the autonomous coining loop to generate variations, screen available domains on the fly, and score winners.
+
+```powershell
+# 1. Ingest & filter English vocabulary (~11,000 words)
 namefinder prepare
 
-# Stage 2 — vibe-score words (needs OPENROUTER_API_KEY in .env, free models supported)
-namefinder score
+# 2. Score top base roots locally (~2.1s per word with early-out on RTX 3060)
+namefinder score --backend local --limit 200
 
-# Stage 2 with explicit limit or model override:
-namefinder score --limit 50
-namefinder score --model nvidia/nemotron-3.5-lightning:free
+# 3. Launch continuous autonomous discovery stream (press Ctrl+C anytime to pause)
+namefinder coin --continuous --backend local
 
-# Stage 3 — check domain availability (.dev, .app, use<word>.com, <word>.com; no key needed)
-namefinder check-domains
+# 4. View top discovered brands with free domains
+namefinder top --free-domains
+```
 
-# Stage 4 — screen trademarks + repo collisions (USPTO, PyPI, GitHub; no key needed)
-namefinder check-trademarks
+---
 
-# Stage 5 — write shortlist.md and shortlist.csv (needs OPENROUTER_API_KEY in .env)
-namefinder rank-final
+### Alternative: Direct Dictionary Screening
 
-# Stage 5 alternative without LLM key (uses cached data & composite scores):
+If you want to evaluate pure dictionary words directly for domain and trademark clearance:
+
+```powershell
+# 1. Ingest dictionary words
+namefinder prepare
+
+# 2. Score dictionary words
+namefinder score --backend local --limit 100
+
+# 3. Check domains via keyless RDAP (.com, .dev, .app)
+namefinder check-domains --top-n 200
+
+# 4. Check USPTO trademarks (Markbase), PyPI, and GitHub
+namefinder check-trademarks --top-n 50
+
+# 5. Export final shortlist
 namefinder rank-final --skip-llm
 ```
 
 ---
 
-## Coin custom brand variations (Neologisms)
+## Coin Custom Brand Variations (`namefinder coin`)
 
-Programmatically generate custom words from top winners or specific bases (supports prefixes like `in-`, `re-`, portmanteau blending like `inspect` + `spectral` -> `inspectral`, and classical suffixes):
+The coining engine algorithmically generates novel, pronounceable neologisms using 5 mutation engines (prefixes, Latin/Greek suffixes, overlapping portmanteau blending, syllabic truncations, and vowel shifts).
 
-```bash
-# Coin variations from specific bases (e.g. spectral, quartz, atlas, fathom):
-namefinder coin --bases spectral,quartz,atlas,fathom
+### Independent Per-Variation Sampling
 
-# Run continuous autonomous discovery loop (samples full ranking with exponential decay, coins, checks RDAP, scores winners):
+Rather than drawing 2–3 base words and producing 20 variations of each (which causes repetitive clumping), **every single variation is an independent sample drawn with replacement from your scored vocabulary** using rank-weighted exponential decay ($P(r) \propto 2^{-r / k}$):
+
+- **Top 10 candidates**: Sampled ~24% of the time.
+- **Top 50 candidates**: Sampled ~74% of the time.
+- **Ranks 51–300+**: Retain ~26% probability for long-tail discovery.
+- **Root Protection**: Coining only samples pure dictionary roots (`source != 'coined'`), preventing previously coined words from compounding into awkward chimeras.
+
+```powershell
+# Continuous autonomous loop (samples roots -> coins -> checks RDAP -> scores winners):
 namefinder coin --continuous --backend local
 
-# Single-pass coining across vocabulary with rank-based exponential falloff (half-life: 25):
-namefinder coin --top-bases 25 --half-life 25 --backend local
+# Single-pass: draw 30 independent variations across your rankings:
+namefinder coin --limit 30 --backend local
 
-# Options:
-namefinder coin --bases spectral,fathom --limit 30
-namefinder coin --no-domains     # skip domain check
-namefinder coin --no-score       # skip LLM scoring
+# Adjust the sampling half-life (default: 25.0; lower = more top-heavy, higher = broader):
+namefinder coin --continuous --half-life 40.0 --backend local
+
+# Coin from specific base words:
+namefinder coin --bases spectral,fathom,lattice --limit 20
+
+# Fast dry-run without RDAP checks or LLM scoring:
+namefinder coin --no-domains --no-score --limit 50
 ```
 
 ---
 
-## View rankings and status in CLI
+## View Rankings and Status in CLI
 
-```bash
-# View top ranked candidates in the terminal with domains & trademarks
+```powershell
+# View top 25 overall candidates in terminal:
 namefinder top
 
-# Filter by availability
-namefinder top --top 50
-namefinder top --free-domains          # show only words with an available domain
-namefinder top --clean                 # show only words clear of trademark conflicts
+# View only candidates with verified free domains (.com, .dev, or .app):
+namefinder top --free-domains
 
-# See pipeline funnel progress & status overview
+# View only candidates clear of trademark conflicts:
+namefinder top --clean
+
+# View more rows:
+namefinder top --free-domains --top 50
+
+# Inspect overall pipeline database counts and funnel progression:
 namefinder status
 ```
 
 ---
 
-## Between stages
+## Cache Management & Re-running
 
-```bash
-# Clear all cached scores from the database without running scoring:
+All stages record progress in `data/namefinder.db`. Re-running any stage automatically skips already processed candidates.
+
+```powershell
+# Clear all cached scores from the database without re-running:
 namefinder score --clear
 
-# Re-run a stage on fresh data (bypasses cache)
+# Force a stage to re-evaluate from scratch (bypasses cache):
 namefinder prepare --refresh
 namefinder score --refresh
 namefinder check-domains --refresh
 namefinder check-trademarks --refresh
 namefinder rank-final --refresh
-
-# Test with a small set (dry-run)
-namefinder prepare --limit 50
-namefinder score --limit 20
-namefinder check-domains --limit 10
-namefinder check-trademarks --limit 10
 ```
 
 ---
 
-## Flags accepted across stages
+## Flags Accepted Across Stages
 
-| Flag | Where accepted | What it does |
+| Flag | Subcommands | Description |
 |---|---|---|
-| `--limit N` | All stages | Process only the first N words (dry-run) |
-| `--refresh` | All stages | Ignore cache and re-run the stage |
-| `--clear` | `score` | Wipe all cached scores from the database without re-scoring |
-| `--free-domains-only` | `score` | Score ONLY candidates that already have a free domain |
-| `--top-n N` | `score`, `check-domains`, `check-trademarks` | Keep only top N candidates |
-| `--top N` | `top` | Number of ranked candidates to display (default: 25) |
-| `--free-domains` | `top` | Show only candidates with at least one free domain |
-| `--clean` | `top` | Show only candidates clear of trademark conflicts |
-| `--backend {openrouter,local}` | `score` | Scoring backend (default: `openrouter`; 'local' for LM Studio) |
-| `--concurrency N` | `score` | Parallel API calls (default: 6) |
+| `--limit N` | All stages | Process only the first N candidates (useful for testing) |
+| `--refresh` | All stages | Ignore cached answers and re-evaluate |
+| `--clear` | `score` | Wipe all cached scores from database without re-scoring |
+| `--free-domains-only` | `score` | Score only candidates that have at least one verified free domain |
+| `--backend {local,openrouter}` | `score`, `coin` | Scoring engine (`local` for LM Studio, `openrouter` for cloud) |
+| `--continuous`, `-c` | `coin` | Run autonomous generation, RDAP check, and scoring loop |
+| `--half-life FLOAT` | `coin` | Rank falloff half-life for base word sampling (default: `25.0`) |
+| `--top-bases N` | `coin` | Number of base words to sample across vocabulary (default: `25`) |
+| `--bases WORD1,WORD2` | `coin` | Explicit root words to coin from |
+| `--min-len N` / `--max-len N` | `coin` | Character length constraints for coined words (default: 5–10) |
+| `--no-domains` | `coin` | Skip automatic RDAP domain checks |
+| `--no-score` | `coin` | Skip automatic LLM brand scoring |
+| `--top N`, `-n N` | `top` | Number of ranked candidates to display (default: 25) |
+| `--free-domains` | `top` | Filter display to candidates with at least one free domain |
+| `--clean` | `top` | Filter display to candidates clear of trademark conflicts |
 | `--model MODEL` | `score`, `rank-final` | Override the model ID |
-| `--skip-llm` | `rank-final` | Write report from cached data without calling OpenRouter |
-| `--no-markbase` | `check-trademarks` | Skip USPTO trademark screening |
-| `--no-ipgod` | `check-trademarks` | Skip local IP Australia CSV screening |
-| `--no-pypi` | `check-trademarks` | Skip PyPI package name collision check |
-| `--no-github` | `check-trademarks` | Skip GitHub AI repo search |
+| `--concurrency N` | `score` | Number of parallel requests (default: 6) |
+| `--skip-llm` | `rank-final` | Write reports from cached SQLite data without calling an LLM |
 | `--db PATH` | All stages | Override SQLite database file path |
 
 ---
 
-## Output files
+## Output Files
 
 | File | What it is |
 |---|---|
 | `data/namefinder.db` | SQLite cache — all stages write here (WAL mode) |
 | `results/shortlist.md` | Final ranked markdown table (Stage 5) |
 | `results/shortlist.csv` | Same shortlist data as CSV |
-
----
-
-## Stage-by-stage flow
-
-```
-11,474 words (prepare)
-    │
-    ▼
-~500 top-scoring (score)  [or top by frequency if stage 2 is skipped]
-    │
-    ▼
-Words with a free domain (check-domains)
-    │
-    ▼
-Clean of trademarks and repo collisions (check-trademarks)
-    │
-    ▼
-Final ranked shortlist (rank-final / rank-final --skip-llm / namefinder top)
-```
 
 Each stage is resumable — stop and restart anytime. Cached rows are skipped automatically.
