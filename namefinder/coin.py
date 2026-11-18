@@ -16,7 +16,7 @@ from typing import Iterable, Sequence
 
 from tqdm import tqdm
 
-from . import config, console, db, domains, score
+from . import budget, config, console, db, domains, score
 
 PREFIXES = (
     "in", "re", "con", "syn", "per", "pro", "meta", "omni",
@@ -379,6 +379,11 @@ def run_continuous_loop(
 
     try:
         while True:
+            if budget.exhausted():
+                print(budget.stop_notice())
+                print(budget.summary())
+                print(f"[coin] Summary: {total_coined} coined candidates evaluated, {total_free} free domain winners added to rankings.")
+                break
             cycle += 1
             # 1. Fetch current rankings (dictionary roots only, never re-coin already coined words)
             with db.session(db_path) as conn:
@@ -442,6 +447,8 @@ def run_continuous_loop(
     except (KeyboardInterrupt, asyncio.CancelledError):
         print(f"\n[coin] Continuous stream halted cleanly by user.")
         print(f"[coin] Summary: {total_coined} coined candidates evaluated, {total_free} free domain winners added to rankings.")
+        if budget.calls():
+            print(budget.summary())
         print("[coin] Run `namefinder top --free-domains` to view full results.\n")
 
 
@@ -539,6 +546,10 @@ def run(
                 api_url=api_url, api_key=api_key, batch_size=batch_size
             ))
 
+    if budget.calls():
+        print(budget.summary())
+        if budget.exhausted():
+            print(budget.stop_notice())
     with db.session(db_path) as conn:
         console.show_live_top_10(
             conn, qversion,

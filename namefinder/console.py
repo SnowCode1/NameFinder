@@ -16,12 +16,14 @@ from rich.progress import (
     BarColumn,
     MofNCompleteColumn,
     Progress,
+    ProgressColumn,
     SpinnerColumn,
     TaskProgressColumn,
     TextColumn,
     TimeRemainingColumn,
 )
 from rich.table import Table
+from rich.text import Text
 
 
 def get_terminal_width() -> int:
@@ -296,6 +298,16 @@ def show_live_top_10(
         print_leaderboard(rows, title=title, limit=limit)
 
 
+class CostColumn(ProgressColumn):
+    """Live spend / limit and token counts, re-rendered on every refresh."""
+
+    def render(self, task) -> Text:
+        from . import budget
+        text = budget.metrics_text()
+        style = "bold red" if budget.exhausted() else "green"
+        return Text(text, style=style)
+
+
 class LiveScoringDashboard:
     """A pro-grade, in-place refreshing live dashboard displaying progress and top 10 leaderboard."""
 
@@ -321,6 +333,7 @@ class LiveScoringDashboard:
             TaskProgressColumn(),
             MofNCompleteColumn(),
             TimeRemainingColumn(),
+            CostColumn(),
             expand=True,
         )
         self.task_id = self.progress.add_task(description, total=total)
