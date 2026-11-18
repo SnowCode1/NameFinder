@@ -189,6 +189,12 @@ Coining Examples:
                         help="scoring backend (default: openrouter; 'local' for LM Studio)")
     p_coin.add_argument("--min-len", type=int, default=5, help="minimum candidate length (default: 5)")
     p_coin.add_argument("--max-len", type=int, default=10, help="maximum candidate length (default: 10)")
+    p_coin.add_argument("--batch", type=int, default=config.COIN_BATCH,
+                        help="coined words per continuous cycle (default: %(default)s)")
+    p_coin.add_argument("--domain-top", type=float, default=config.COIN_DOMAIN_TOP,
+                        help="fraction of each cycle (best scores) to domain-check; 1.0 = all (default: %(default)s)")
+    p_coin.add_argument("--concurrency", type=int, default=4,
+                        help="parallel scoring requests per cycle (default: %(default)s)")
     p_coin.add_argument("--model", default=None, help="model id override for scoring coined words")
     p_coin.add_argument("--max-cost", type=float, default=None, help=_MAX_COST_HELP)
     p_coin.add_argument("--no-domains", action="store_true", help="skip automatic RDAP domain checks")
@@ -332,6 +338,9 @@ def main(argv: list[str] | None = None) -> int:
                 half_life=getattr(args, "half_life", 25.0),
                 backend=getattr(args, "backend", None),
                 model_override=args.model,
+                batch=args.batch,
+                domain_top=args.domain_top,
+                concurrency=args.concurrency,
                 db_path=args.db,
             )
         elif args.cmd == "status":

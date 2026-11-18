@@ -82,7 +82,7 @@ def _stale(cutoff: str | None) -> bool:
     return cutoff is None
 
 
-async def _run_async(jobs: list[tuple[str, str, str]], db_path=None) -> dict[str, int]:
+async def _run_async(jobs: list[tuple[str, str, str]], db_path=None, quiet: bool = False) -> dict[str, int]:
     by_registry: dict[str, list[tuple[str, str, str]]] = {}
     for word, domain, role in jobs:
         by_registry.setdefault(_registry_for(role), []).append((word, domain, role))
@@ -92,10 +92,10 @@ async def _run_async(jobs: list[tuple[str, str, str]], db_path=None) -> dict[str
     lock = asyncio.Lock()
 
     async with net.async_client(timeout=25.0) as http:
-        pacers = {r: net.Pacer(config.RDAP_RATE_PER_SEC) for r in by_registry}
+        pacers = {r: net.Pacer(config.RDAP_RATE_BY_REGISTRY.get(r, config.RDAP_RATE_PER_SEC)) for r in by_registry}
         # A little concurrency keeps the pipeline busy while the pacer enforces
         # the per-registry request rate.
-        sems = {r: asyncio.Semaphore(4) for r in by_registry}
+        sems = {r: asyncio.Semaphore(8) for r in by_registry}
 
         tasks = [
             asyncio.create_task(_check(http, w, d, role, pacers[reg], sems[reg]))
@@ -104,7 +104,7 @@ async def _run_async(jobs: list[tuple[str, str, str]], db_path=None) -> dict[str
         ]
 
         done = 0
-        with tqdm(total=len(tasks), desc="Checking domains", unit="domain", ncols=80) as pbar:
+        with tqdm(total=len(tasks), desc="Checking domains", unit="domain", ncols=80, disable=quiet) as pbar:
             for coro in asyncio.as_completed(tasks):
                 row = await coro
                 async with lock:

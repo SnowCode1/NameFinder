@@ -174,7 +174,12 @@ RDAP_ENDPOINTS = {
     "app": "https://pubapi.registry.google/rdap/domain/{domain}",
 }
 REGISTRY_BY_TLD = {"com": "verisign", "dev": "google", "app": "google"}
-RDAP_RATE_PER_SEC = 2.0     # hard cap per registry
+RDAP_RATE_PER_SEC = 2.0     # default cap per registry
+# Measured: Verisign (.com) handled 10 req/s cleanly; Google's registry (.dev/.app)
+# returned 429s at 3 req/s, so it stays at 2.
+RDAP_RATE_BY_REGISTRY = {"verisign": 8.0, "google": 2.0}
+COIN_BATCH = 40              # coined words per continuous cycle
+COIN_DOMAIN_TOP = 0.25       # fraction of each cycle (best scores) that gets a domain check
 DOMAIN_STALE_DAYS = 7
 
 
