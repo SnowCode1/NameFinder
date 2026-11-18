@@ -178,6 +178,17 @@ RDAP_RATE_PER_SEC = 2.0     # default cap per registry
 # Measured: Verisign (.com) handled 10 req/s cleanly; Google's registry (.dev/.app)
 # returned 429s at 3 req/s, so it stays at 2.
 RDAP_RATE_BY_REGISTRY = {"verisign": 8.0, "google": 2.0}
+# Coining quality gates and learning
+COIN_MIN_PHONETIC = 0.70     # reject coined candidates below this pronounceability score
+# Unambiguous crude/embarrassing fragments (checked as substrings). Deliberately
+# short: fragments like "ass" or "cum" would reject ordinary words.
+COIN_BLOCK_SUBSTRINGS = (
+    "rectum", "anus", "porn", "fuck", "shit", "piss", "cunt", "slut", "whore",
+    "nazi", "rape", "dildo", "penis", "vagina", "sexy", "nigg",
+)
+COIN_BLOCK_EDGES = ("sex",)  # blocked only at the start or end of a word
+COIN_LEARN_PRIOR = 10        # pseudo-observations pulling per-engine/partner means toward the overall mean
+COIN_EXPLORE = 0.30          # share of engine sampling kept uniform so no engine is starved
 COIN_BATCH = 40              # coined words per continuous cycle
 COIN_DOMAIN_TOP = 0.25       # fraction of each cycle (best scores) that gets a domain check
 DOMAIN_STALE_DAYS = 7
