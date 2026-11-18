@@ -90,6 +90,7 @@ async def _ask(http, url, headers, model, chunk: list[str], temperature: float) 
         ],
         "temperature": temperature,
         "max_tokens": 4000,
+        **config.openrouter_extras(url),
     }
     for attempt in range(5):
         try:
@@ -109,7 +110,9 @@ async def _ask(http, url, headers, model, chunk: list[str], temperature: float) 
             tqdm.write(f"[refine] HTTP {r.status_code}: {r.text[:160]}", file=sys.stderr)
             return None
         try:
-            content = (r.json().get("choices") or [{}])[0].get("message", {}).get("content")
+            payload = r.json()
+            score.record_usage(payload)
+            content = (payload.get("choices") or [{}])[0].get("message", {}).get("content")
             parsed = score._parse_scores(content)
             if parsed:
                 return parsed
@@ -134,7 +137,7 @@ def merge_samples(samples: list[dict[str, Any]]) -> dict[str, Any]:
     return merged
 
 
-def build_row(conn, old: dict[str, Any], m: dict[str, Any]) -> dict[str, Any]:
+def build_row(conn, old: dict[str, Any], m: dict[str, Any], model: str = "") -> dict[str, Any]:
     """Combine pass-1 fields, the merged LLM review and the deterministic checks."""
     word = old["word"]
     det = phonetics.analyze(word)
@@ -164,6 +167,7 @@ def build_row(conn, old: dict[str, Any], m: dict[str, Any]) -> dict[str, Any]:
 
     return {
         **old,
+        "model": f"{old.get('model') or '?'} | refine:{model}" if model else old.get("model"),
         "natural": round(natural, 4),
         "spellable": round(spellable, 4),
         "neg": round(neg, 4),
@@ -231,7 +235,7 @@ async def refine_words(
             ).fetchone()
             if not row:
                 continue
-            db.upsert_score(conn, build_row(conn, dict(row), merge_samples(samp)))
+            db.upsert_score(conn, build_row(conn, dict(row), merge_samples(samp), model))
             done += 1
     return done
 
@@ -245,6 +249,7 @@ def run(
     free_domains_only: bool = False,
     db_path=None,
     sample: int = 15,
+    concurrency: int | None = None,
 ) -> None:
     qversion = config.QUESTION_VERSION
     top_n = top_n or config.REFINE_TOP_N
@@ -259,7 +264,8 @@ def run(
     else:
         api_url = api_key = None
         model = model or config.REFINE_MODEL
-        batch_size, concurrency = 8, config.SCORE_CONCURRENCY
+        batch_size = 8
+        concurrency = concurrency or config.SCORE_CONCURRENCY
 
     with db.session(db_path) as conn:
         todo = pick_candidates(conn, qversion, top_n, refresh, free_domains_only)
@@ -276,6 +282,7 @@ def run(
                 batch_size=batch_size, samples=samples, concurrency=concurrency, pbar=pbar,
             ))
         print(f"[refine] refined {done}/{len(todo)} words")
+        print(score.usage_summary())
     except (KeyboardInterrupt, asyncio.CancelledError):
         print("\n[refine] interrupted; nothing was written for the unfinished run.")
         return
