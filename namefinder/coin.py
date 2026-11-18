@@ -8,9 +8,11 @@ availability, and scores them using the calibrated brand rubric.
 from __future__ import annotations
 
 import asyncio
+import math
 import random
 import re
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Iterable, Sequence
 
@@ -346,8 +348,11 @@ def run_continuous_loop(
     backend: str | None = None,
     db_path=None,
     model_override: str | None = None,
+    batch: int = 40,
+    domain_top: float = 0.25,
+    concurrency: int = 4,
 ) -> None:
-    """Continuously sample base words, generate variations, check domains, and score winners."""
+    """Continuously coin names, score them all, and domain-check the best slice in the background."""
     qversion = config.QUESTION_VERSION
 
     # Determine backend & model
@@ -376,14 +381,32 @@ def run_continuous_loop(
 
     cycle = 0
     total_coined = 0
-    total_free = 0
+    session_words: set[str] = set()
+    executor = ThreadPoolExecutor(max_workers=1)
+    pending = None
+
+    def free_winners() -> int:
+        """Words coined in this session that have at least one free domain."""
+        if pending is not None:
+            try:
+                pending.result()
+            except Exception as exc:  # RDAP trouble must not lose the session summary
+                print(f"[coin] background domain check failed: {exc}")
+        if not session_words:
+            return 0
+        with db.session(db_path) as conn:
+            marks = ",".join("?" * len(session_words))
+            return conn.execute(
+                f"SELECT COUNT(DISTINCT word) FROM domains WHERE status = 'available' AND word IN ({marks})",
+                list(session_words),
+            ).fetchone()[0]
 
     try:
         while True:
             if budget.exhausted():
                 print(budget.stop_notice())
                 print(budget.summary())
-                print(f"[coin] Summary: {total_coined} coined candidates evaluated, {total_free} free domain winners added to rankings.")
+                print(f"[coin] Summary: {total_coined} coined candidates scored, {free_winners()} with a free domain.")
                 break
             cycle += 1
             # 1. Fetch current rankings (dictionary roots only, never re-coin already coined words)
@@ -396,7 +419,7 @@ def run_continuous_loop(
 
             # 2. Draw novel variations where every single variation is an independent sample with replacement
             novel_pairs = coin_stream_batch(
-                ranked, batch_size=15, half_life=half_life, min_len=min_len, max_len=max_len, db_path=db_path
+                ranked, batch_size=batch, half_life=half_life, min_len=min_len, max_len=max_len, db_path=db_path
             )
             if not novel_pairs:
                 print(f"[Cycle {cycle}] Retrying candidate generation...")
@@ -404,50 +427,54 @@ def run_continuous_loop(
 
             novel = [p[0] for p in novel_pairs]
             total_coined += len(novel)
+            session_words.update(novel)
             sample_summary = ", ".join(f"{c} (from {b})" for c, b in novel_pairs[:4])
             print(f"[Cycle {cycle}] Sampled {len(novel)} independent variations (e.g. {sample_summary}...)")
 
-            # 4. Check domains via RDAP
-            jobs = [(w, dom, role) for w in novel for dom, role in domains.domains_for(w)]
-            counts = asyncio.run(domains._run_async(jobs, db_path=db_path))
+            # 3. Score every new word first. Nearly all coined words have a free domain,
+            #    so the domain check is a poor filter and a slow one (RDAP is rate-limited).
+            with tqdm(total=len(novel), desc=f"Cycle {cycle} scoring", unit="word", ncols=100) as pbar:
+                asyncio.run(score.score_words_openrouter(
+                    novel, qversion, model, db_path=db_path, pbar=pbar,
+                    api_url=api_url, api_key=api_key, batch_size=batch_size,
+                    concurrency=concurrency, mode="brand",
+                ))
 
-            # 5. Extract survivors with free domains
+            # 4. Domain-check only the best-scoring slice of this batch, in the background
+            #    so the next cycle's sampling and scoring overlap with the RDAP wait.
             with db.session(db_path) as conn:
-                passing = conn.execute(
+                scored = conn.execute(
                     """
-                    SELECT word FROM domains
-                    WHERE word IN ({}) AND status = 'available'
-                    GROUP BY word
+                    SELECT word FROM scores
+                    WHERE qversion = ? AND word IN ({})
+                    ORDER BY composite DESC
                     """.format(",".join("?" * len(novel))),
-                    novel,
+                    [qversion, *novel],
                 ).fetchall()
-                free_words = [r["word"] for r in passing]
+            keep = max(1, math.ceil(len(scored) * domain_top)) if scored else 0
+            to_check = [r["word"] for r in scored[:keep]]
+            if to_check:
+                jobs = [(w, dom, role) for w in to_check for dom, role in domains.domains_for(w)]
+                if pending is not None:
+                    pending.result()      # never run two RDAP batches at once (per-registry pacing)
+                pending = executor.submit(
+                    lambda j=jobs: asyncio.run(domains._run_async(j, db_path=db_path, quiet=True))
+                )
+                print(f"[Cycle {cycle}] Scored {len(scored)} | checking domains for top {len(to_check)} in background")
 
-            total_free += len(free_words)
-            print(f"[Cycle {cycle}] Generated: {len(novel)} | RDAP free domains: {len(free_words)} (Cumulative free: {total_free})")
-
-            # 6. Score free domain words with LLM
-            if free_words:
-                print(f"[Cycle {cycle}] Scoring {len(free_words)} free-domain candidates...")
-                with tqdm(total=len(free_words), desc=f"Cycle {cycle} scoring", unit="word", ncols=80) as pbar:
-                    asyncio.run(score.score_words_openrouter(
-                        free_words, qversion, model, db_path=db_path, pbar=pbar,
-                        api_url=api_url, api_key=api_key, batch_size=batch_size
-                    ))
-
-                # Render live Top 10 leaderboard for discovered free-domain brands
-                with db.session(db_path) as conn:
-                    console.show_live_top_10(
-                        conn, qversion,
-                        title=f"Continuous Discovery: Top 10 Winners with Free Domains (Cycle {cycle})",
-                        free_domains_only=True,
-                    )
+            with db.session(db_path) as conn:
+                console.show_live_top_10(
+                    conn, qversion,
+                    title=f"Continuous Discovery: Top 10 Winners with Free Domains (Cycle {cycle})",
+                    free_domains_only=True,
+                )
 
             print("-" * 70)
 
     except (KeyboardInterrupt, asyncio.CancelledError):
         print(f"\n[coin] Continuous stream halted cleanly by user.")
-        print(f"[coin] Summary: {total_coined} coined candidates evaluated, {total_free} free domain winners added to rankings.")
+        print("[coin] finishing the last background domain check...")
+        print(f"[coin] Summary: {total_coined} coined candidates scored, {free_winners()} with a free domain.")
         if budget.calls():
             print(budget.summary())
         print("[coin] Run `namefinder top --free-domains` to view full results.\n")
@@ -466,6 +493,9 @@ def run(
     backend: str | None = None,
     db_path=None,
     model_override: str | None = None,
+    batch: int = 40,
+    domain_top: float = 0.25,
+    concurrency: int = 4,
 ) -> list[str]:
     """Main CLI entrypoint for namefinder coin."""
     if continuous:
@@ -476,6 +506,9 @@ def run(
             backend=backend,
             db_path=db_path,
             model_override=model_override,
+            batch=batch,
+            domain_top=domain_top,
+            concurrency=concurrency,
         )
         return []
 
