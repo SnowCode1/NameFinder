@@ -182,6 +182,7 @@ namefinder rank-final --refresh
 | `--free-domains` | `top` | Filter display to candidates with at least one free domain |
 | `--clean` | `top` | Filter display to candidates clear of trademark conflicts |
 | `--bases-only` | `top` | Hide coined names; show dictionary base words only |
+| `--max-cost USD` | `score`, `coin`, `refine` | Stop sending paid requests once this much is spent in the command (default `$1.00`, env `NAMEFINDER_MAX_COST`; `0` = no limit). In-flight requests finish, so spend can overshoot slightly; progress is saved and a rerun continues |
 | `--top-n N` / `--samples N` | `refine` | How many top coined words to review, and independent reviews per word (defaults: 100 / 3) |
 | `--model MODEL` | `score`, `rank-final` | Override the model ID |
 | `--concurrency N` | `score` | Number of parallel requests (default: 6) |

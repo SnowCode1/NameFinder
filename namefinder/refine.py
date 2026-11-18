@@ -19,7 +19,7 @@ from typing import Any
 
 from tqdm import tqdm
 
-from . import config, console, db, net, phonetics, score
+from . import budget, config, console, db, net, phonetics, score
 
 DEFAULT_REFINE_PROMPT = (
     "You are a phonetics-aware brand naming reviewer for a software product.\n"
@@ -93,6 +93,8 @@ async def _ask(http, url, headers, model, chunk: list[str], temperature: float) 
         **config.openrouter_extras(url),
     }
     for attempt in range(5):
+        if budget.exhausted():
+            return None
         try:
             r = await http.post(f"{url}/chat/completions", json=body, headers=headers)
         except Exception as exc:
@@ -111,7 +113,7 @@ async def _ask(http, url, headers, model, chunk: list[str], temperature: float) 
             return None
         try:
             payload = r.json()
-            score.record_usage(payload)
+            budget.record(payload)
             content = (payload.get("choices") or [{}])[0].get("message", {}).get("content")
             parsed = score._parse_scores(content)
             if parsed:
@@ -217,6 +219,7 @@ async def refine_words(
                         results[w].append(by_word[w])
             if pbar:
                 pbar.update(len(chunk))
+                pbar.set_postfix_str(budget.metrics_text(), refresh=False)
 
         jobs = []
         for s in range(samples):
@@ -282,7 +285,9 @@ def run(
                 batch_size=batch_size, samples=samples, concurrency=concurrency, pbar=pbar,
             ))
         print(f"[refine] refined {done}/{len(todo)} words")
-        print(score.usage_summary())
+        print(budget.summary())
+        if budget.exhausted():
+            print(budget.stop_notice())
     except (KeyboardInterrupt, asyncio.CancelledError):
         print("\n[refine] interrupted; nothing was written for the unfinished run.")
         return

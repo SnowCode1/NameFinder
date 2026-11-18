@@ -6,7 +6,13 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import config, console, db
+from . import budget, config, console, db
+
+
+_MAX_COST_HELP = (
+    f"stop issuing paid API requests once this many USD are spent in this command "
+    f"(default: ${config.MAX_COST:.2f}; 0 = no limit)"
+)
 
 
 def _add_common(p: argparse.ArgumentParser) -> None:
@@ -79,6 +85,7 @@ Scoring Examples:
                     help="scoring backend (default: openrouter; 'local' for LM Studio)")
     p2.add_argument("--mode", choices=["auto", "root", "brand"], default="auto",
                     help="scoring mode: 'root' for base conceptual potency, 'brand' for standalone names (default: auto)")
+    p2.add_argument("--max-cost", type=float, default=None, help=_MAX_COST_HELP)
     p2.add_argument("--clear", action="store_true",
                     help="back up the database, then delete all scores and coined words (no re-scoring)")
     p2.add_argument("--free-domains-only", action="store_true",
@@ -134,6 +141,7 @@ Scoring Examples:
     p_ref.add_argument("--model", default=None, help="model id override (default: OPENROUTER_REFINE_MODEL)")
     p_ref.add_argument("--concurrency", type=int, default=config.SCORE_CONCURRENCY,
                        help="parallel requests for cloud backends (default: %(default)s)")
+    p_ref.add_argument("--max-cost", type=float, default=None, help=_MAX_COST_HELP)
     p_ref.add_argument("--refresh", action="store_true", help="re-review words already refined")
     p_ref.add_argument("--free-domains-only", action="store_true",
                        help="review only coined words that have a free domain")
@@ -181,6 +189,7 @@ Coining Examples:
                         help="scoring backend (default: openrouter; 'local' for LM Studio)")
     p_coin.add_argument("--min-len", type=int, default=5, help="minimum candidate length (default: 5)")
     p_coin.add_argument("--max-len", type=int, default=10, help="maximum candidate length (default: 10)")
+    p_coin.add_argument("--max-cost", type=float, default=None, help=_MAX_COST_HELP)
     p_coin.add_argument("--no-domains", action="store_true", help="skip automatic RDAP domain checks")
     p_coin.add_argument("--no-score", action="store_true", help="skip LLM brand scoring")
 
@@ -269,6 +278,9 @@ def cmd_status(db_path) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+
+    if args.cmd in ("score", "score-jev", "refine", "coin"):
+        budget.reset(getattr(args, "max_cost", None))
 
     try:
         if args.cmd == "prepare":

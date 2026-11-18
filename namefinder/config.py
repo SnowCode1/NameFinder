@@ -224,5 +224,7 @@ def openrouter_extras(url: str) -> dict:
     return extras
 
 
+# Per-command spend cap in USD for paid API calls (0 disables). Override with --max-cost.
+MAX_COST = float(os.getenv("NAMEFINDER_MAX_COST", "1.0"))
 OPENROUTER_BATCH = 25        # words per call; keeps us at 1-2 calls total
 MAX_FINAL = 50
