@@ -345,6 +345,7 @@ def run_continuous_loop(
     max_len: int = 10,
     backend: str | None = None,
     db_path=None,
+    model_override: str | None = None,
 ) -> None:
     """Continuously sample base words, generate variations, check domains, and score winners."""
     qversion = config.QUESTION_VERSION
@@ -359,10 +360,10 @@ def run_continuous_loop(
     if backend in ("local", "lmstudio"):
         api_url = "http://localhost:1234/v1"
         api_key = "lm-studio"
-        model = "qwen3-4b-instruct-2507"
+        model = model_override or "qwen3-4b-instruct-2507"
         batch_size = 8
     else:
-        model = config.SCORE_MODEL
+        model = model_override or config.SCORE_MODEL
         batch_size = 20
 
     print("\n" + "=" * 70)
@@ -464,6 +465,7 @@ def run(
     half_life: float = 25.0,
     backend: str | None = None,
     db_path=None,
+    model_override: str | None = None,
 ) -> list[str]:
     """Main CLI entrypoint for namefinder coin."""
     if continuous:
@@ -473,6 +475,7 @@ def run(
             max_len=max_len,
             backend=backend,
             db_path=db_path,
+            model_override=model_override,
         )
         return []
 
@@ -536,7 +539,7 @@ def run(
 
         api_url = "http://localhost:1234/v1" if backend in ("local", "lmstudio") else None
         api_key = "lm-studio" if backend in ("local", "lmstudio") else None
-        model = "qwen3-4b-instruct-2507" if backend in ("local", "lmstudio") else config.SCORE_MODEL
+        model = model_override or ("qwen3-4b-instruct-2507" if backend in ("local", "lmstudio") else config.SCORE_MODEL)
         batch_size = 8 if backend in ("local", "lmstudio") else 20
 
         print(f"\n--- Brand Scoring {len(words_to_score)} Coined Words ({backend}: {model}) ---")

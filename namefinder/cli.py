@@ -189,6 +189,7 @@ Coining Examples:
                         help="scoring backend (default: openrouter; 'local' for LM Studio)")
     p_coin.add_argument("--min-len", type=int, default=5, help="minimum candidate length (default: 5)")
     p_coin.add_argument("--max-len", type=int, default=10, help="maximum candidate length (default: 10)")
+    p_coin.add_argument("--model", default=None, help="model id override for scoring coined words")
     p_coin.add_argument("--max-cost", type=float, default=None, help=_MAX_COST_HELP)
     p_coin.add_argument("--no-domains", action="store_true", help="skip automatic RDAP domain checks")
     p_coin.add_argument("--no-score", action="store_true", help="skip LLM brand scoring")
@@ -330,6 +331,7 @@ def main(argv: list[str] | None = None) -> int:
                 continuous=getattr(args, "continuous", False),
                 half_life=getattr(args, "half_life", 25.0),
                 backend=getattr(args, "backend", None),
+                model_override=args.model,
                 db_path=args.db,
             )
         elif args.cmd == "status":
