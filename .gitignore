@@ -50,3 +50,7 @@ prompts/*.md
 prompts/*.txt
 !prompts/*.example.md
 !prompts/*.example.txt
+
+# Local documentation & Claude Code local settings
+docs/
+.claude/settings.local.json
