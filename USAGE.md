@@ -180,6 +180,7 @@ namefinder rank-final --refresh
 | `--no-score` | `coin` | Skip automatic LLM brand scoring |
 | `--top N`, `-n N` | `top` | Number of ranked candidates to display (default: 25) |
 | `--free-domains` | `top` | Filter display to candidates with at least one free domain |
+| `--all-free` | `top` | Only candidates whose every checked domain is free (words with no domain check are excluded) |
 | `--clean` | `top` | Filter display to candidates clear of trademark conflicts |
 | `--bases-only` | `top` | Hide coined names; show dictionary base words only |
 | `--batch N` / `--domain-top F` / `--concurrency N` | `coin` | Continuous mode: coined words per cycle (default 40), fraction of each cycle's best scores that get a domain check (default 0.25; `1.0` = all), parallel scoring requests (default 4) |

@@ -152,6 +152,8 @@ Scoring Examples:
                        help="how many candidates to show (default: 25)")
     p_top.add_argument("--free-domains", action="store_true",
                        help="show only candidates with at least one free domain")
+    p_top.add_argument("--all-free", action="store_true",
+                       help="show only candidates whose every checked domain is free (unchecked words excluded)")
     p_top.add_argument("--clean", action="store_true",
                        help="show only candidates clear of trademark conflicts")
     p_top.add_argument("--bases-only", action="store_true",
@@ -207,7 +209,7 @@ Coining Examples:
 
 
 def cmd_top(db_path, limit: int = 25, only_free: bool = False, only_clean: bool = False,
-            bases_only: bool = False) -> None:
+            bases_only: bool = False, all_free: bool = False) -> None:
     with db.session(db_path) as conn:
         qversion = config.QUESTION_VERSION
         items = db.get_candidates_summary(
@@ -215,11 +217,14 @@ def cmd_top(db_path, limit: int = 25, only_free: bool = False, only_clean: bool 
             only_free_domains=only_free,
             only_clean_trademarks=only_clean,
             bases_only=bases_only,
+            all_domains_free=all_free,
         )
 
         filter_desc = []
         if bases_only:
             filter_desc.append("base words only")
+        if all_free:
+            filter_desc.append("all checked domains free")
         if only_free:
             filter_desc.append("free domains only")
         if only_clean:
@@ -322,7 +327,7 @@ def main(argv: list[str] | None = None) -> int:
                        concurrency=args.concurrency)
         elif args.cmd == "top":
             cmd_top(args.db, limit=args.top_count, only_free=args.free_domains, only_clean=args.clean,
-                    bases_only=args.bases_only)
+                    bases_only=args.bases_only, all_free=args.all_free)
         elif args.cmd == "coin":
             from . import coin
             bases_list = [b.strip() for b in args.bases.split(",")] if args.bases else None

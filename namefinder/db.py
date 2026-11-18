@@ -452,6 +452,7 @@ def get_candidates_summary(
     only_free_domains: bool = False,
     only_clean_trademarks: bool = False,
     bases_only: bool = False,
+    all_domains_free: bool = False,
 ) -> list[dict[str, Any]]:
     """Return enriched rows for CLI inspection."""
     base_rows = ranked_words(conn, qversion, limit=None, dict_only=bases_only)
@@ -465,6 +466,8 @@ def get_candidates_summary(
         ).fetchall()
         any_free = any(d["status"] == "available" for d in dom_rows)
         if only_free_domains and not any_free:
+            continue
+        if all_domains_free and not (dom_rows and all(d["status"] == "available" for d in dom_rows)):
             continue
 
         dom_summary = []
