@@ -80,7 +80,7 @@ Scoring Examples:
     p2.add_argument("--mode", choices=["auto", "root", "brand"], default="auto",
                     help="scoring mode: 'root' for base conceptual potency, 'brand' for standalone names (default: auto)")
     p2.add_argument("--clear", action="store_true",
-                    help="wipe all cached scores from the database without re-scoring")
+                    help="back up the database, then delete all scores and coined words (no re-scoring)")
     p2.add_argument("--free-domains-only", action="store_true",
                     help="score ONLY words that already have a free domain")
     p2.add_argument("--top-n", type=int, default=config.SCORE_TOP_N,
@@ -121,6 +121,21 @@ Scoring Examples:
     p5.add_argument("--skip-llm", action="store_true",
                     help="write the report from cached data without calling OpenRouter")
 
+    p_ref = sub.add_parser(
+        "refine",
+        help="pass 2: spoken-name review (syllables, say-aloud, mishearing) of the top coined words",
+    )
+    _add_common(p_ref)
+    p_ref.add_argument("--top-n", type=int, default=config.REFINE_TOP_N,
+                       help=f"how many top coined words to review (default: {config.REFINE_TOP_N})")
+    p_ref.add_argument("--samples", type=int, default=config.REFINE_SAMPLES,
+                       help="independent reviews per word, averaged (default: %(default)s)")
+    p_ref.add_argument("--backend", choices=["openrouter", "local", "lmstudio"], default=None)
+    p_ref.add_argument("--model", default=None, help="model id override (default: OPENROUTER_REFINE_MODEL)")
+    p_ref.add_argument("--refresh", action="store_true", help="re-review words already refined")
+    p_ref.add_argument("--free-domains-only", action="store_true",
+                       help="review only coined words that have a free domain")
+
     p_top = sub.add_parser("top", help="inspect candidate rankings directly in the terminal")
     _add_common(p_top)
     p_top.add_argument("--top", "-n", dest="top_count", type=int, default=25,
@@ -129,6 +144,8 @@ Scoring Examples:
                        help="show only candidates with at least one free domain")
     p_top.add_argument("--clean", action="store_true",
                        help="show only candidates clear of trademark conflicts")
+    p_top.add_argument("--bases-only", action="store_true",
+                       help="show only dictionary base words (exclude coined names)")
 
     p_coin = sub.add_parser(
         "coin",
@@ -171,16 +188,20 @@ Coining Examples:
     return ap
 
 
-def cmd_top(db_path, limit: int = 25, only_free: bool = False, only_clean: bool = False) -> None:
+def cmd_top(db_path, limit: int = 25, only_free: bool = False, only_clean: bool = False,
+            bases_only: bool = False) -> None:
     with db.session(db_path) as conn:
         qversion = config.QUESTION_VERSION
         items = db.get_candidates_summary(
             conn, qversion, limit=limit,
             only_free_domains=only_free,
             only_clean_trademarks=only_clean,
+            bases_only=bases_only,
         )
 
         filter_desc = []
+        if bases_only:
+            filter_desc.append("base words only")
         if only_free:
             filter_desc.append("free domains only")
         if only_clean:
@@ -273,8 +294,13 @@ def main(argv: list[str] | None = None) -> int:
             from . import final
             final.run(limit=args.limit, refresh=args.refresh, model=args.model,
                       db_path=args.db, skip_llm=args.skip_llm)
+        elif args.cmd == "refine":
+            from . import refine
+            refine.run(top_n=args.top_n, samples=args.samples, model=args.model, backend=args.backend,
+                       refresh=args.refresh, free_domains_only=args.free_domains_only, db_path=args.db)
         elif args.cmd == "top":
-            cmd_top(args.db, limit=args.top_count, only_free=args.free_domains, only_clean=args.clean)
+            cmd_top(args.db, limit=args.top_count, only_free=args.free_domains, only_clean=args.clean,
+                    bases_only=args.bases_only)
         elif args.cmd == "coin":
             from . import coin
             bases_list = [b.strip() for b in args.bases.split(",")] if args.bases else None

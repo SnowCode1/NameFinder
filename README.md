@@ -177,7 +177,7 @@ namefinder rank-final --skip-llm
 |---|---|---|
 | `--limit N` | All stages | Process only the first N candidates (useful for testing) |
 | `--refresh` | All stages | Bypass cache and re-run the stage |
-| `--clear` | `score` | Wipe cached scores from the database without re-scoring |
+| `--clear` | `score` | Back up the database to `data/backups/`, then delete all scores and coined words |
 | `--free-domains-only` | `score` | Score only words that have at least one free domain |
 | `--backend {local,openrouter}` | `score`, `coin` | Select scoring backend (`local` for LM Studio, `openrouter` for cloud) |
 | `--continuous`, `-c` | `coin` | Run autonomous generation, domain check, and scoring loop |
@@ -187,6 +187,7 @@ namefinder rank-final --skip-llm
 | `--top N`, `-n N` | `top` | Number of rows to display (default: 25) |
 | `--free-domains` | `top` | Show only candidates with at least one free domain |
 | `--clean` | `top` | Show only candidates clear of trademark conflicts |
+| `--bases-only` | `top` | Hide coined names; show dictionary base words only |
 
 ---
 

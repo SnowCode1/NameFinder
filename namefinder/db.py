@@ -117,6 +117,19 @@ CREATE TABLE IF NOT EXISTS final_tags (
 """
 
 
+# Columns added to `scores` after the first release (name, SQL type).
+SCORE_EXTRA_COLUMNS = (
+    ("why", "TEXT"),
+    ("why_not", "TEXT"),
+    ("syllables", "TEXT"),      # e.g. "met-a-prism"
+    ("say_aloud", "TEXT"),      # plain respelling from the refine pass
+    ("misheard_as", "TEXT"),    # sound-alike risk from the refine pass
+    ("ambiguity", "REAL"),      # 0..1 chance a listener misspells / readers misread
+    ("phonetic", "REAL"),       # 0..1 blended pronounceability
+    ("refined", "INTEGER DEFAULT 0"),  # 1 once the refine pass has run
+)
+
+
 def connect(path: Path | str | None = None) -> sqlite3.Connection:
     p = Path(path) if path else config.DB_PATH
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -124,17 +137,13 @@ def connect(path: Path | str | None = None) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
     conn.executescript(SCHEMA)
-    # Ensure why and why_not columns exist in scores
-    try:
-        conn.execute("ALTER TABLE scores ADD COLUMN why TEXT")
-        conn.commit()
-    except Exception:
-        pass
-    try:
-        conn.execute("ALTER TABLE scores ADD COLUMN why_not TEXT")
-        conn.commit()
-    except Exception:
-        pass
+    # Additive migrations for databases created before these columns existed
+    for col, decl in SCORE_EXTRA_COLUMNS:
+        try:
+            conn.execute(f"ALTER TABLE scores ADD COLUMN {col} {decl}")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass  # column already present
     return conn
 
 
@@ -174,17 +183,48 @@ def count_words(conn: sqlite3.Connection) -> int:
     return conn.execute("SELECT COUNT(*) c FROM words").fetchone()["c"]
 
 
-def words_without_scores(conn: sqlite3.Connection, qversion: str) -> list[str]:
+def words_without_scores(
+    conn: sqlite3.Connection, qversion: str, include_coined: bool = False
+) -> list[str]:
+    """Unscored words. Coined words are excluded unless ``include_coined`` is set."""
+    coined_clause = "" if include_coined else "AND COALESCE(w.source, '') != 'coined'"
     rows = conn.execute(
-        """
+        f"""
         SELECT w.word FROM words w
         LEFT JOIN scores s ON s.word = w.word AND s.qversion = ?
-        WHERE s.word IS NULL
+        WHERE s.word IS NULL {coined_clause}
         ORDER BY w.zipf DESC
         """,
         (qversion,),
     ).fetchall()
     return [r["word"] for r in rows]
+
+
+def backup_database(conn: sqlite3.Connection, backup_dir: Path | None = None) -> Path:
+    """Write a consistent snapshot of the database and return its path."""
+    from datetime import datetime
+
+    db_file = conn.execute("PRAGMA database_list").fetchone()["file"]
+    target_dir = Path(backup_dir) if backup_dir else Path(db_file).parent / "backups"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    target = target_dir / f"{Path(db_file).stem}-{stamp}.db"
+    dest = sqlite3.connect(target)
+    try:
+        conn.backup(dest)
+    finally:
+        dest.close()
+    return target
+
+
+def clear_scores_and_coined(conn: sqlite3.Connection) -> tuple[int, int]:
+    """Delete all scores and all coined words. Returns (scores, coined_words) removed."""
+    n_scores = conn.execute("SELECT COUNT(*) FROM scores").fetchone()[0]
+    n_coined = conn.execute("SELECT COUNT(*) FROM words WHERE source = 'coined'").fetchone()[0]
+    conn.execute("DELETE FROM scores")
+    conn.execute("DELETE FROM words WHERE source = 'coined'")
+    conn.commit()
+    return n_scores, n_coined
 
 
 # --- stage 2 ---------------------------------------------------------------
@@ -193,11 +233,17 @@ def upsert_score(conn: sqlite3.Connection, row: dict[str, Any]) -> None:
         """
         INSERT OR REPLACE INTO scores
             (word, qversion, model, fit, natural, spellable, memorable, neg,
-             taken, common, composite, why, why_not, raw, scored_at)
+             taken, common, composite, why, why_not, raw, scored_at,
+             syllables, say_aloud, misheard_as, ambiguity, phonetic, refined)
         VALUES (:word, :qversion, :model, :fit, :natural, :spellable, :memorable,
-                :neg, :taken, :common, :composite, :why, :why_not, :raw, :scored_at)
+                :neg, :taken, :common, :composite, :why, :why_not, :raw, :scored_at,
+                :syllables, :say_aloud, :misheard_as, :ambiguity, :phonetic, :refined)
         """,
-        {"why": None, "why_not": None, **row},
+        {
+            "why": None, "why_not": None, "syllables": None, "say_aloud": None,
+            "misheard_as": None, "ambiguity": None, "phonetic": None, "refined": 0,
+            **row,
+        },
     )
 
 
@@ -405,9 +451,10 @@ def get_candidates_summary(
     limit: int = 25,
     only_free_domains: bool = False,
     only_clean_trademarks: bool = False,
+    bases_only: bool = False,
 ) -> list[dict[str, Any]]:
     """Return enriched rows for CLI inspection."""
-    base_rows = ranked_words(conn, qversion, limit=None)
+    base_rows = ranked_words(conn, qversion, limit=None, dict_only=bases_only)
     out: list[dict[str, Any]] = []
 
     for r in base_rows:
@@ -485,6 +532,11 @@ def get_candidates_summary(
             "trademark": tm_str,
             "why": why_str,
             "why_not": why_not_str,
+            "syllables": r["syllables"] if "syllables" in r.keys() else None,
+            "say_aloud": r["say_aloud"] if "say_aloud" in r.keys() else None,
+            "misheard_as": r["misheard_as"] if "misheard_as" in r.keys() else None,
+            "phonetic": r["phonetic"] if "phonetic" in r.keys() else None,
+            "refined": bool(r["refined"]) if "refined" in r.keys() else False,
         })
         if len(out) >= limit:
             break

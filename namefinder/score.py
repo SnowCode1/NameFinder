@@ -16,7 +16,7 @@ from typing import Any, Iterable
 import httpx
 from tqdm import tqdm
 
-from . import config, console, db, net
+from . import config, console, db, net, phonetics
 
 
 def _now() -> str:
@@ -132,6 +132,26 @@ def composite_brand(
 
 # Default alias
 composite = composite_brand
+
+
+def generic_prefix_penalty(conn, word: str) -> float:
+    """Penalty for coined words that are just <generic prefix> + <dictionary word>."""
+    for prefix, pen in config.GENERIC_PREFIX_PENALTY.items():
+        if word.startswith(prefix) and len(word) > len(prefix) + 2:
+            stem = word[len(prefix):]
+            hit = conn.execute(
+                "SELECT 1 FROM words WHERE word = ? AND COALESCE(source, '') != 'coined'", (stem,)
+            ).fetchone()
+            if hit:
+                return pen
+    return 0.0
+
+
+def adjust_brand_composite(conn, word: str, comp: float, phonetic: float) -> float:
+    """Apply the pronounceability gate and the generic-prefix penalty to a brand composite."""
+    gate = phonetics.phonetic_gate(phonetic, config.PHONETIC_WEIGHT)
+    pen = generic_prefix_penalty(conn, word)
+    return round(comp * gate * (1.0 - pen), 4)
 
 
 def _parse_scores(content: str | None) -> list[dict[str, Any]] | None:
@@ -292,8 +312,11 @@ async def score_words_openrouter(
 
                     if is_root:
                         comp_score = composite_root(fit, natural, spellable, memorable, neg)
+                        ph = None
                     else:
                         comp_score = composite_brand(fit, natural, spellable, memorable, neg, taken, common)
+                        ph = phonetics.analyze(w)
+                        comp_score = adjust_brand_composite(conn, w, comp_score, ph.score)
 
                     row = {
                         "word": w,
@@ -311,6 +334,9 @@ async def score_words_openrouter(
                         "why_not": why_not_text,
                         "raw": json.dumps({"openrouter": item}, default=str)[:20000],
                         "scored_at": now_ts,
+                        "syllables": ph.split if ph else None,
+                        "ambiguity": ph.ambiguity if ph else None,
+                        "phonetic": ph.score if ph else None,
                     }
                     db.upsert_score(conn, row)
                     done += 1
@@ -340,10 +366,10 @@ def run(
 ) -> None:
     if clear_only:
         with db.session(db_path) as conn:
-            c = conn.execute("SELECT COUNT(*) FROM scores").fetchone()[0]
-            conn.execute("DELETE FROM scores")
-            conn.commit()
-        print(f"[score] cleared all {c} cached scores from database (database is clean).")
+            backup = db.backup_database(conn)
+            n_scores, n_coined = db.clear_scores_and_coined(conn)
+        print(f"[score] backed up database to {backup}")
+        print(f"[score] cleared {n_scores} cached scores and {n_coined} coined words.")
         return
 
     qversion = config.QUESTION_VERSION
@@ -370,36 +396,45 @@ def run(
         model = model or config.SCORE_MODEL
         batch_size = 15
 
+    # Coined words are only scored when brand mode is requested explicitly.
+    include_coined = mode == "brand"
+    coined_clause = "" if include_coined else "AND COALESCE(w.source, '') != 'coined'"
+
     with db.session(db_path) as conn:
         total = db.count_words(conn)
         if total == 0:
             raise SystemExit("[score] no words cached - run `prepare` first")
         if refresh:
-            conn.execute("DELETE FROM scores")
+            # Only drop scores for the words this run will re-score.
+            conn.execute(
+                f"DELETE FROM scores WHERE word IN (SELECT w.word FROM words w WHERE 1=1 {coined_clause})"
+            )
             conn.commit()
             if free_domains_only:
                 todo = [r["word"] for r in conn.execute(
-                    "SELECT w.word FROM words w JOIN domains d ON d.word = w.word WHERE d.status = 'available' GROUP BY w.word ORDER BY w.zipf DESC"
+                    f"SELECT w.word FROM words w JOIN domains d ON d.word = w.word WHERE d.status = 'available' {coined_clause} GROUP BY w.word ORDER BY w.zipf DESC"
                 ).fetchall()]
             else:
-                todo = [r["word"] for r in conn.execute("SELECT word FROM words ORDER BY zipf DESC")]
+                todo = [r["word"] for r in conn.execute(
+                    f"SELECT w.word FROM words w WHERE 1=1 {coined_clause} ORDER BY w.zipf DESC"
+                )]
             if limit:
                 todo = todo[:limit]
         else:
             if free_domains_only:
                 todo = [r["word"] for r in conn.execute(
-                    """
+                    f"""
                     SELECT w.word FROM words w
                     JOIN domains d ON d.word = w.word AND d.status = 'available'
                     LEFT JOIN scores s ON s.word = w.word AND s.qversion = ?
-                    WHERE s.word IS NULL
+                    WHERE s.word IS NULL {coined_clause}
                     GROUP BY w.word
                     ORDER BY w.zipf DESC
                     """,
                     (qversion,),
                 ).fetchall()]
             else:
-                todo = db.words_without_scores(conn, qversion)
+                todo = db.words_without_scores(conn, qversion, include_coined=include_coined)
             if limit:
                 todo = todo[:limit]
         cached = conn.execute(

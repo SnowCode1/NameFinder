@@ -151,6 +151,19 @@ TAKEN_DAMP = 0.75      # weight of "already a known software brand"
 COMMON_NAME_DAMP = 0.50
 
 
+# Pronounceability and distinctiveness (applied to coined words only)
+PHONETIC_WEIGHT = 0.30       # how hard a perfectly unpronounceable word is penalised
+GENERIC_PREFIX_PENALTY = {   # prefix -> composite multiplier reduction
+    "meta": 0.08, "pan": 0.08, "ultra": 0.08, "omni": 0.06, "pro": 0.06,
+    "inter": 0.05, "syn": 0.04, "neo": 0.05, "sub": 0.04, "co": 0.04,
+    "con": 0.03, "re": 0.03, "in": 0.03, "per": 0.03, "epi": 0.03,
+}
+# Refine pass (second pass over the top coined words)
+REFINE_MODEL = os.getenv("OPENROUTER_REFINE_MODEL") or SCORE_MODEL
+REFINE_TOP_N = 100
+REFINE_SAMPLES = 3
+
+
 # --- stage 3: domains ------------------------------------------------------
 TLDS = ("dev", "app")
 USE_PREFIX = "use"          # use<word>.com
