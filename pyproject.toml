@@ -1,0 +1,22 @@
+[project]
+name = "namefinder"
+version = "0.1.0"
+description = "Resumable pipeline that discovers and clears an original single-word brand name."
+requires-python = ">=3.10"
+dependencies = [
+    "wordfreq>=3.1.1",
+    "nltk>=3.8",
+    "httpx>=0.27",
+    "python-dotenv>=1.0",
+    "tqdm>=4.66.0",
+]
+
+[project.scripts]
+namefinder = "namefinder.cli:main"
+
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["namefinder*"]

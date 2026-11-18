@@ -1,0 +1,46 @@
+# Environment & secrets
+.env
+.env.*
+!.env.example
+
+# Databases & local cache
+*.db
+*.db-wal
+*.db-shm
+data/
+results/
+tmp/
+.tmp/
+
+# Python & virtual environments
+.venv/
+.venv*/
+venv/
+ENV/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+build/
+dist/
+
+# Test & linter caches
+.pytest_cache/
+.coverage
+htmlcov/
+.ruff_cache/
+.mypy_cache/
+
+# IDE & OS metadata
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+.Thumbs.db
+desktop.ini
+
+# Corpora / Downloaded models
+nltk_data/
