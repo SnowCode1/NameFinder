@@ -132,6 +132,8 @@ Scoring Examples:
                        help="independent reviews per word, averaged (default: %(default)s)")
     p_ref.add_argument("--backend", choices=["openrouter", "local", "lmstudio"], default=None)
     p_ref.add_argument("--model", default=None, help="model id override (default: OPENROUTER_REFINE_MODEL)")
+    p_ref.add_argument("--concurrency", type=int, default=config.SCORE_CONCURRENCY,
+                       help="parallel requests for cloud backends (default: %(default)s)")
     p_ref.add_argument("--refresh", action="store_true", help="re-review words already refined")
     p_ref.add_argument("--free-domains-only", action="store_true",
                        help="review only coined words that have a free domain")
@@ -297,7 +299,8 @@ def main(argv: list[str] | None = None) -> int:
         elif args.cmd == "refine":
             from . import refine
             refine.run(top_n=args.top_n, samples=args.samples, model=args.model, backend=args.backend,
-                       refresh=args.refresh, free_domains_only=args.free_domains_only, db_path=args.db)
+                       refresh=args.refresh, free_domains_only=args.free_domains_only, db_path=args.db,
+                       concurrency=args.concurrency)
         elif args.cmd == "top":
             cmd_top(args.db, limit=args.top_count, only_free=args.free_domains, only_clean=args.clean,
                     bases_only=args.bases_only)

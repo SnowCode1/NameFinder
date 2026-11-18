@@ -19,6 +19,25 @@ from tqdm import tqdm
 from . import config, console, db, net, phonetics
 
 
+# Running token/cost totals for the current process (OpenRouter reports usage per call).
+USAGE: dict[str, float] = {"calls": 0, "prompt": 0, "completion": 0, "reasoning": 0, "cost": 0.0}
+
+
+def record_usage(payload: dict) -> None:
+    u = payload.get("usage") or {}
+    USAGE["calls"] += 1
+    USAGE["prompt"] += u.get("prompt_tokens") or 0
+    USAGE["completion"] += u.get("completion_tokens") or 0
+    USAGE["reasoning"] += (u.get("completion_tokens_details") or {}).get("reasoning_tokens") or 0
+    USAGE["cost"] += u.get("cost") or 0.0
+
+
+def usage_summary() -> str:
+    u = USAGE
+    return (f"[usage] calls={int(u['calls'])} in={int(u['prompt']):,} out={int(u['completion']):,} "
+            f"(reasoning={int(u['reasoning']):,}) cost=${u['cost']:.5f}")
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -198,6 +217,7 @@ async def score_words_openrouter(
     api_url: str | None = None,
     api_key: str | None = None,
     mode: str = "auto",
+    concurrency: int = 1,
 ) -> int:
     url = api_url or config.OPENROUTER_URL
     key = api_key or config.secret(config.OPENROUTER_KEY_ENV)
@@ -226,8 +246,8 @@ async def score_words_openrouter(
         active_system_prompt = ROOT_SYSTEM_PROMPT if is_root else BRAND_SYSTEM_PROMPT
 
         async with net.async_client(timeout=120.0) as http:
-            for idx in range(0, len(words), batch_size):
-                chunk = words[idx : idx + batch_size]
+            async def process(chunk: list[str]) -> None:
+                nonlocal done, failed
                 body = {
                     "model": model,
                     "messages": [
@@ -236,6 +256,7 @@ async def score_words_openrouter(
                     ],
                     "temperature": 0.2,
                     "max_tokens": 3500,
+                    **config.openrouter_extras(url),
                 }
 
                 parsed: list[dict[str, Any]] | None = None
@@ -269,7 +290,9 @@ async def score_words_openrouter(
                         break
 
                     try:
-                        choices = r.json().get("choices") or [{}]
+                        payload = r.json()
+                        record_usage(payload)
+                        choices = payload.get("choices") or [{}]
                         content = choices[0].get("message", {}).get("content")
                         parsed = _parse_scores(content)
                         if parsed:
@@ -284,7 +307,7 @@ async def score_words_openrouter(
                     tqdm.write(f"[score] warning: batch failed after retries; skipping {len(chunk)} words (they remain queued for next pass)", file=sys.stderr)
                     if pbar:
                         pbar.update(len(chunk))
-                    continue
+                    return
 
                 by_word = {str(item.get("word", "")).strip().lower(): item for item in parsed}
                 now_ts = _now()
@@ -346,7 +369,16 @@ async def score_words_openrouter(
                     dashboard.update(advance=len(chunk))
                 elif pbar:
                     pbar.update(len(chunk))
-                await asyncio.sleep(0.3)
+
+            sem = asyncio.Semaphore(max(1, concurrency))
+
+            async def guarded(chunk: list[str]) -> None:
+                async with sem:
+                    await process(chunk)
+
+            await asyncio.gather(*(
+                guarded(words[i : i + batch_size]) for i in range(0, len(words), batch_size)
+            ))
 
     return done
 
@@ -462,11 +494,14 @@ def run(
                     done = asyncio.run(score_words_openrouter(
                         todo, qversion, model, db_path, dashboard=dashboard, api_url=api_url, api_key=api_key,
                         batch_size=batch_size, mode=mode,
+                        concurrency=concurrency or 1,
                     ))
                 else:
                     raise SystemExit(f"[score] unknown backend: {backend}. Use 'openrouter' or 'local'.")
         except (KeyboardInterrupt, asyncio.CancelledError):
             print("\n[score] Scoring paused by user (Ctrl+C). Progress safely saved to database.")
 
+    if USAGE["calls"]:
+        print(usage_summary())
     with db.session(db_path) as conn:
         console.show_live_top_10(conn, qversion, title=f"Top {sample} Scored Candidates", limit=sample)

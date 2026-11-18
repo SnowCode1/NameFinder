@@ -201,5 +201,28 @@ TRADEMARK_STALE_DAYS = 30
 # --- stage 5: final tagging ------------------------------------------------
 OPENROUTER_URL = "https://openrouter.ai/api/v1"
 OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL") or "nvidia/nemotron-3.5-lightning:free"
+# Optional OpenRouter routing. OPENROUTER_REASONING: "low" (default; also minimal,
+# medium, high) sets reasoning effort, "off" sends enabled=false (some endpoints
+# reject this), "on" leaves the model default. Pin providers with OPENROUTER_PROVIDER
+# (comma-separated names, no fallbacks).
+OPENROUTER_PROVIDER = os.getenv("OPENROUTER_PROVIDER", "").strip()
+OPENROUTER_REASONING = os.getenv("OPENROUTER_REASONING", "low").strip().lower()
+
+
+def openrouter_extras(url: str) -> dict:
+    """Extra request-body fields for OpenRouter; empty for local servers."""
+    if "openrouter.ai" not in url:
+        return {}
+    extras: dict = {}
+    if OPENROUTER_REASONING == "off":
+        extras["reasoning"] = {"enabled": False}
+    elif OPENROUTER_REASONING != "on":
+        extras["reasoning"] = {"effort": OPENROUTER_REASONING}
+    if OPENROUTER_PROVIDER:
+        names = [n.strip() for n in OPENROUTER_PROVIDER.split(",") if n.strip()]
+        extras["provider"] = {"order": names, "allow_fallbacks": False}
+    return extras
+
+
 OPENROUTER_BATCH = 25        # words per call; keeps us at 1-2 calls total
 MAX_FINAL = 50
