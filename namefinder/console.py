@@ -1,4 +1,4 @@
-"""Pro-grade terminal UI styling, ANSI color badges, and box-drawing leaderboards."""
+"""Pro-grade terminal UI styling, rich table formatting, and in-place refreshing live dashboards."""
 
 from __future__ import annotations
 
@@ -7,6 +7,30 @@ import re
 import sqlite3
 import sys
 from typing import Any, Sequence
+
+import shutil
+from rich import box
+from rich.console import Console, Group
+from rich.live import Live
+from rich.progress import (
+    BarColumn,
+    MofNCompleteColumn,
+    Progress,
+    SpinnerColumn,
+    TaskProgressColumn,
+    TextColumn,
+    TimeRemainingColumn,
+)
+from rich.table import Table
+
+
+def get_terminal_width() -> int:
+    cols = shutil.get_terminal_size(fallback=(120, 30)).columns
+    return max(cols, 110)
+
+
+# Global console instance (auto-detects terminal width, clamped to >= 110)
+_console = Console(width=get_terminal_width())
 
 # Enable VT100 / ANSI escape sequences on Windows consoles
 if sys.platform == "win32":
@@ -95,21 +119,21 @@ def b_white(text: Any) -> str:
 
 
 def badge_score(score: float) -> str:
-    """Format composite score with color hierarchy."""
+    """Format composite score with rich markup hierarchy."""
     s = f"{score:.3f}"
     if score >= 0.85:
-        return f"{B_GREEN}{s}{RESET}"
+        return f"[bold green]{s}[/]"
     if score >= 0.70:
-        return f"{B_CYAN}{s}{RESET}"
+        return f"[bold cyan]{s}[/]"
     if score >= 0.50:
-        return f"{YELLOW}{s}{RESET}"
-    return f"{DIM}{s}{RESET}"
+        return f"[yellow]{s}[/]"
+    return f"[dim]{s}[/]"
 
 
 def format_domain_summary(domain_state: str | None) -> str:
-    """Format domain tokens like 'com:available,dev:registered' or 'app=FREE com=taken' into colored badges."""
+    """Format domain tokens like 'com:available,dev:registered' or 'app=FREE com=taken' into rich badges."""
     if not domain_state or domain_state == "not checked":
-        return dim("not checked")
+        return "[dim]not checked[/]"
 
     parts = []
     cleaned = domain_state.replace(",", " ")
@@ -121,65 +145,52 @@ def format_domain_summary(domain_state: str | None) -> str:
         tld, status = t.split(sep, 1)
         is_free = status.lower() in ("available", "free")
         if is_free:
-            parts.append(f"{tld}={B_GREEN}FREE{RESET}")
+            parts.append(f"[bold white]{tld}[/] [bold green]FREE[/]")
         else:
-            parts.append(f"{DIM}{tld}=taken{RESET}")
-    return " ".join(parts) if parts else dim("not checked")
+            parts.append(f"[dim]{tld}=taken[/]")
+    return "  ".join(parts) if parts else "[dim]not checked[/]"
 
 
 def badge_trademark(status: str | None) -> str:
-    """Format trademark verdict into color badge."""
+    """Format trademark verdict into rich markup badge."""
     if not status or status == "not checked":
-        return dim("not checked")
+        return "[dim]not checked[/]"
     st = status.lower()
     if "clear" in st:
-        return f"{B_GREEN}CLEAR{RESET}"
+        return "[bold green]CLEAR[/]"
     if "conflict" in st or "taken" in st:
-        return f"{B_RED}CONFLICT{RESET}"
-    return f"{B_YELLOW}{status}{RESET}"
+        return "[bold red]CONFLICT[/]"
+    return f"[bold yellow]{status}[/]"
 
 
-def print_leaderboard(
+def build_rich_table(
     rows: Sequence[sqlite3.Row | dict[str, Any]],
-    title: str = "Top 10 Candidates",
+    title: str = "Top Candidates",
     limit: int = 10,
     show_domains: bool = True,
     show_reasoning: bool = True,
-) -> None:
-    """Render a clean, pro-grade box table of top ranked candidates."""
+) -> Table:
+    """Construct an auto-expanding rich Table that fills the full terminal width."""
     items = list(rows)[:limit]
-    if not items:
-        return
+    t = Table(
+        title=f"[bold cyan]{title}[/]",
+        box=box.ROUNDED,
+        expand=True,
+        header_style="bold cyan",
+        show_header=True,
+        border_style="dim",
+    )
 
-    # Column widths
-    w_rank = 3
-    w_cand = 14
-    w_score = 7
-    w_fit = 5
-    w_nat = 5
-    w_dom = 34 if show_domains else 0
+    t.add_column("#", justify="right", style="bold cyan", no_wrap=True, min_width=3)
+    t.add_column("Candidate", style="bold white", no_wrap=True, min_width=12)
+    t.add_column("Score", justify="center", no_wrap=True, min_width=7)
+    t.add_column("Fit", justify="center", no_wrap=True, min_width=5)
+    t.add_column("Nat", justify="center", no_wrap=True, min_width=5)
 
-    header_parts = [
-        f"{'#':<{w_rank}}",
-        f"{'Candidate':<{w_cand}}",
-        f"{'Score':<{w_score}}",
-        f"{'Fit':<{w_fit}}",
-        f"{'Nat':<{w_nat}}",
-    ]
     if show_domains:
-        header_parts.append(f"{'Domains':<{w_dom}}")
+        t.add_column("Domains", no_wrap=True, min_width=25)
     if show_reasoning:
-        header_parts.append("Reasoning & Brand Fit")
-
-    header_line = " ".join(header_parts)
-    box_width = max(len(header_line) + 2, 88)
-
-    # Box title
-    title_bar = f"── {bold(b_cyan(title))} "
-    dashes = "─" * max(0, box_width - len(title) - 6)
-    print(f"\n┌{title_bar}{dashes}┐")
-    print(f"│ {bold(header_line):<{box_width - 2}} │")
-    print(f"├{'─' * (box_width - 2)}┤")
+        t.add_column("Reasoning & Brand Fit", style="italic", min_width=20)
 
     for i, item in enumerate(items, 1):
         r = dict(item) if hasattr(item, "keys") else item
@@ -188,36 +199,58 @@ def print_leaderboard(
         fit = r.get("fit", 0.0) or 0.0
         nat = r.get("natural", 0.0) or 0.0
 
-        rank_str = f"{i:<{w_rank}}"
-        cand_str = ansi_ljust(bold(word), w_cand)
-        score_str = ansi_ljust(badge_score(comp), w_score)
-        fit_str = f"{fit:.2f}"
-        nat_str = f"{nat:.2f}"
+        score_text = badge_score(comp)
+        fit_text = f"{fit:.2f}"
+        nat_text = f"{nat:.2f}"
+
+        row_cells = [
+            str(i),
+            f"[bold white]{word}[/]",
+            score_text,
+            fit_text,
+            nat_text,
+        ]
+
+        if show_domains:
+            dom_text = format_domain_summary(r.get("domains") or r.get("domain_state"))
+            row_cells.append(dom_text)
 
         if show_reasoning:
             why = r.get("why") or ""
             why_not = r.get("why_not") or ""
             if why and why_not:
-                reason = f"{why} {dim(f'[Risk: {why_not}]')}"
+                reason = f"{why} [dim][Risk: {why_not}][/]"
             elif why:
                 reason = why
             elif why_not:
-                reason = dim(f"[Risk: {why_not}]")
+                reason = f"[dim][Risk: {why_not}][/]"
             else:
-                reason = dim("-")
+                reason = "[dim]-[/]"
+            row_cells.append(reason)
 
-        # Print line with colored values
-        formatted_row = f"{rank_str} {cand_str} {score_str} {fit_str:<{w_fit}} {nat_str:<{w_nat}}"
-        if show_domains:
-            dom_text = format_domain_summary(r.get("domains") or r.get("domain_state"))
-            dom_str = ansi_ljust(dom_text, w_dom)
-            formatted_row += f" {dom_str}"
-        if show_reasoning:
-            formatted_row += f" {reason}"
+        t.add_row(*row_cells)
 
-        print(f"│ {formatted_row}")
+    return t
 
-    print(f"└{'─' * (box_width - 2)}┘\n")
+
+def print_leaderboard(
+    rows: Sequence[sqlite3.Row | dict[str, Any]],
+    title: str = "Top Candidates",
+    limit: int = 10,
+    show_domains: bool = True,
+    show_reasoning: bool = True,
+) -> None:
+    """Print an auto-expanding leaderboard table."""
+    if not rows:
+        return
+    t = build_rich_table(
+        rows,
+        title=title,
+        limit=limit,
+        show_domains=show_domains,
+        show_reasoning=show_reasoning,
+    )
+    _console.print(t)
 
 
 def show_live_top_10(
@@ -254,3 +287,80 @@ def show_live_top_10(
 
     if rows:
         print_leaderboard(rows, title=title, limit=limit)
+
+
+class LiveScoringDashboard:
+    """A pro-grade, in-place refreshing live dashboard displaying progress and top 10 leaderboard."""
+
+    def __init__(
+        self,
+        description: str,
+        total: int,
+        qversion: str,
+        db_path=None,
+        free_domains_only: bool = False,
+        leaderboard_title: str = "Live Leaderboard: Top 10 Scored Candidates",
+    ):
+        self.total = total
+        self.qversion = qversion
+        self.db_path = db_path
+        self.free_domains_only = free_domains_only
+        self.leaderboard_title = leaderboard_title
+        self.console = Console(width=get_terminal_width())
+        self.progress = Progress(
+            SpinnerColumn(style="bold cyan"),
+            TextColumn("[bold cyan]{task.description}"),
+            BarColumn(bar_width=None),
+            TaskProgressColumn(),
+            MofNCompleteColumn(),
+            TimeRemainingColumn(),
+            expand=True,
+        )
+        self.task_id = self.progress.add_task(description, total=total)
+        self.live = Live(self._render_view(), console=self.console, refresh_per_second=4)
+
+    def _fetch_rows(self, limit: int = 10):
+        from . import db
+        with db.session(self.db_path) as conn:
+            if self.free_domains_only:
+                sql = """
+                    SELECT s.word, s.composite, s.fit, s.natural, s.why, s.why_not,
+                           GROUP_CONCAT(d.tld || ':' || d.status) AS domain_state
+                    FROM scores s
+                    JOIN domains d ON d.word = s.word
+                    WHERE s.qversion = ?
+                    GROUP BY s.word
+                    HAVING MAX(CASE WHEN d.status = 'available' THEN 1 ELSE 0 END) = 1
+                    ORDER BY s.composite DESC
+                    LIMIT ?
+                """
+                return conn.execute(sql, (self.qversion, limit)).fetchall()
+            else:
+                sql = """
+                    SELECT s.word, s.composite, s.fit, s.natural, s.why, s.why_not,
+                           (SELECT GROUP_CONCAT(d.tld || ':' || d.status) FROM domains d WHERE d.word = s.word) AS domain_state
+                    FROM scores s
+                    WHERE s.qversion = ?
+                    ORDER BY s.composite DESC
+                    LIMIT ?
+                """
+                return conn.execute(sql, (self.qversion, limit)).fetchall()
+
+    def _render_view(self) -> Group:
+        rows = self._fetch_rows(limit=10)
+        if rows:
+            table = build_rich_table(rows, title=self.leaderboard_title, limit=10)
+            return Group(self.progress, table)
+        return Group(self.progress)
+
+    def update(self, advance: int = 0):
+        if advance > 0:
+            self.progress.advance(self.task_id, advance)
+        self.live.update(self._render_view())
+
+    def __enter__(self):
+        self.live.__enter__()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        return self.live.__exit__(exc_type, exc_val, exc_tb)

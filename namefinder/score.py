@@ -132,7 +132,8 @@ async def score_words_openrouter(
     model: str,
     db_path=None,
     batch_size: int = 20,
-    pbar: tqdm | None = None,
+    pbar: Any = None,
+    dashboard: Any = None,
     api_url: str | None = None,
     api_key: str | None = None,
 ) -> int:
@@ -254,11 +255,11 @@ async def score_words_openrouter(
                     done += 1
 
                 conn.commit()
-                if pbar:
+                if dashboard:
+                    dashboard.update(advance=len(chunk))
+                elif pbar:
                     pbar.update(len(chunk))
-                # Render live top 10 leaderboard directly during slow scoring runs
-                console.show_live_top_10(conn, qversion, title=f"Live Top 10 Scored Candidates ({done}/{len(words)} processed)")
-                await asyncio.sleep(1.0)
+                await asyncio.sleep(0.3)
 
     return done
 
@@ -351,10 +352,18 @@ def run(
         print("[score] all words are already scored for this version.")
     else:
         try:
-            with tqdm(total=len(todo), desc="Scoring candidates", unit="word", ncols=80) as pbar:
+            dash_title = f"Live Leaderboard: Top 10 Scored Candidates ({backend})"
+            with console.LiveScoringDashboard(
+                description=f"Scoring {len(todo)} candidates ({backend}: {model})",
+                total=len(todo),
+                qversion=qversion,
+                db_path=db_path,
+                free_domains_only=free_domains_only,
+                leaderboard_title=dash_title,
+            ) as dashboard:
                 if backend in ("openrouter", "local", "lmstudio"):
                     done = asyncio.run(score_words_openrouter(
-                        todo, qversion, model, db_path, pbar=pbar, api_url=api_url, api_key=api_key,
+                        todo, qversion, model, db_path, dashboard=dashboard, api_url=api_url, api_key=api_key,
                         batch_size=batch_size
                     ))
                 else:
