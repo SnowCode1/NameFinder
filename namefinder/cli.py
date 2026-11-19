@@ -202,6 +202,10 @@ Coining Examples:
     p_coin.add_argument("--concurrency", type=int, default=4,
                         help="parallel scoring requests per cycle (default: %(default)s)")
     p_coin.add_argument("--model", default=None, help="model id override for scoring coined words")
+    p_coin.add_argument("--llm-share", type=float, default=config.COIN_LLM_SHARE,
+                        help="fraction of each batch invented by the LLM engine; 0 disables (default: %(default)s)")
+    p_coin.add_argument("--coin-model", default=None,
+                        help="model id for LLM coining (default: OPENROUTER_COIN_MODEL, else the scoring model)")
     p_coin.add_argument("--max-cost", type=float, default=None, help=_MAX_COST_HELP)
     p_coin.add_argument("--no-domains", action="store_true", help="skip automatic RDAP domain checks")
     p_coin.add_argument("--no-score", action="store_true", help="skip LLM brand scoring")
@@ -351,6 +355,8 @@ def main(argv: list[str] | None = None) -> int:
                 batch=args.batch,
                 domain_top=args.domain_top,
                 concurrency=args.concurrency,
+                llm_share=args.llm_share,
+                coin_model=args.coin_model,
                 db_path=args.db,
             )
         elif args.cmd == "status":

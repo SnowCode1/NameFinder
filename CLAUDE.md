@@ -7,6 +7,7 @@ Python CLI pipeline for brand-name discovery: prepare vocabulary, score with an 
 - `namefinder/db.py` - SQLite schema and queries (`data/namefinder.db`)
 - `namefinder/score.py` - LLM scoring; root mode for dictionary words, brand mode for coined words
 - `namefinder/phonetics.py` - deterministic syllable/pronounceability checks
+- `namefinder/llmcoin.py` - LLM coining engine (`engine='llm'`): proposes verb-like names from top bases, same quality gate, feedback from past scores
 - `namefinder/refine.py` - pass 2: spoken-name LLM review of top coined words (`namefinder refine`)
 - `namefinder/budget.py` - per-command OpenRouter spend tracking and `--max-cost` limit
 - `namefinder/console.py` - terminal UI

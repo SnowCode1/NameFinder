@@ -200,6 +200,13 @@ COIN_VERB_SPLICE_WEIGHT = 0.30  # weight of verb_score when choosing among splic
 COIN_LEARN_VERB = 1.0          # engine learning scales a composite by 1 + this * (verbable - 0.5)
 COIN_LEARN_PRIOR = 10        # pseudo-observations pulling per-engine/partner means toward the overall mean
 COIN_EXPLORE = 0.30          # share of engine sampling kept uniform so no engine is starved
+# LLM coining engine (namefinder/llmcoin.py)
+COIN_MODEL = os.getenv("OPENROUTER_COIN_MODEL") or SCORE_MODEL
+COIN_LLM_SHARE = 0.30          # fraction of each continuous cycle that comes from the LLM engine (0 = off)
+COIN_LLM_PER_NAME_COUNT = 8    # names requested per parent word
+COIN_LLM_PARENTS_PER_REQUEST = 6
+COIN_LLM_TEMPERATURE = 0.9
+COIN_LLM_FEEDBACK = 6          # best/worst earlier LLM names shown to the model as style feedback
 COIN_BATCH = 40              # coined words per continuous cycle
 COIN_DOMAIN_TOP = 0.25       # fraction of each cycle (best scores) that gets a domain check
 DOMAIN_STALE_DAYS = 7
