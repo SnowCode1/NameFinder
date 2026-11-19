@@ -329,6 +329,46 @@ def best_splice(a: str, b: str, min_len: int, max_len: int, top: int = 3) -> str
 ENGINES = ("prefix", "suffix", "trunc", "portmanteau", "vowel")
 
 
+def signal(r) -> float:
+    """Composite, amplified by how verb-like the LLM judged the name (unrated = neutral)."""
+    v = 0.5 if r["verbable"] is None else r["verbable"]
+    return r["composite"] * (1.0 + config.COIN_LEARN_VERB * (v - 0.5))
+
+
+def _like_for_like(rows: list, min_rows: int = 30) -> list:
+    """Once enough names carry a verbable rating, learn only from those so old unrated rows do not skew it."""
+    rated = [r for r in rows if r["verbable"] is not None]
+    return rated if len(rated) >= min_rows else rows
+
+
+def llm_share_multiplier(conn, qversion: str, min_each: int = 15) -> float:
+    """Scale the LLM engine's share by how its names have scored against the rule engines (0.5x to 2x)."""
+    rows = conn.execute(
+        """
+        SELECT w.engine, s.composite, s.verbable FROM words w
+        JOIN scores s ON s.word = w.word AND s.qversion = ?
+        WHERE w.source = 'coined' AND w.engine IS NOT NULL
+        """,
+        (qversion,),
+    ).fetchall()
+    rows = _like_for_like(rows)
+    llm = [signal(r) for r in rows if r["engine"] == "llm"]
+    other = [signal(r) for r in rows if r["engine"] != "llm"]
+    if len(llm) < min_each or len(other) < min_each or statistics.fmean(other) <= 0:
+        return 1.0
+    ratio = statistics.fmean(llm) / statistics.fmean(other)
+    return max(0.5, min(2.0, ratio ** 2))
+
+
+def parent_weights(ranked_words: Sequence[Any], half_life: float) -> list[float]:
+    """Rank-based exponential falloff, boosted for verb-like parents."""
+    boost = config.COIN_VERB_PARENT_BOOST
+    return [
+        2.0 ** (-i / half_life) * (1.0 + boost * verbness(r["word"] if hasattr(r, "keys") else str(r)))
+        for i, r in enumerate(ranked_words)
+    ]
+
+
 def learn_weights(conn, qversion: str) -> tuple[dict[str, float], dict[str, float]]:
     """Engine and portmanteau-partner weights from the composites earlier coined words earned.
 
@@ -345,11 +385,7 @@ def learn_weights(conn, qversion: str) -> tuple[dict[str, float], dict[str, floa
     ).fetchall()
     if not rows:
         return {}, {}
-
-    def signal(r) -> float:
-        """Composite, amplified by how verb-like the LLM judged the name (unrated = neutral)."""
-        v = 0.5 if r["verbable"] is None else r["verbable"]
-        return r["composite"] * (1.0 + config.COIN_LEARN_VERB * (v - 0.5))
+    rows = _like_for_like(rows)
 
     by_engine: dict[str, list[float]] = {}
     by_partner: dict[str, list[float]] = {}
@@ -474,11 +510,7 @@ def coin_stream_batch(
     learned: tuple[dict[str, float], dict[str, float]] | None = None,
 ) -> list[tuple[str, str]]:
     """Sample batch_size novel variations, where each variation is its own independent base sample."""
-    boost = config.COIN_VERB_PARENT_BOOST
-    weights = [
-        2.0 ** (-i / half_life) * (1.0 + boost * verbness(r["word"] if hasattr(r, "keys") else str(r)))
-        for i, r in enumerate(ranked_words)
-    ]
+    weights = parent_weights(ranked_words, half_life)
     with db.session(db_path) as conn:
         if learned is None:
             learned = learn_weights(conn, config.QUESTION_VERSION)
@@ -530,6 +562,28 @@ def coin_stream_batch(
     return novel_pairs
 
 
+def _llm_endpoint(backend: str | None, coin_model: str | None, model_override: str | None):
+    """(api_url, api_key, model) for the LLM coining engine."""
+    if backend in ("local", "lmstudio") or (not backend and not config.secret(config.OPENROUTER_KEY_ENV)):
+        return "http://localhost:1234/v1", "lm-studio", coin_model or model_override or "qwen3-4b-instruct-2507"
+    return None, None, coin_model or config.COIN_MODEL
+
+
+def _llm_pairs(ranked, count, half_life, min_len, max_len, db_path, url, key, model) -> list[tuple[str, str]]:
+    """LLM-coined (name, parent) pairs; a failure here must never stop the coining loop."""
+    from . import llmcoin
+    try:
+        pairs = llmcoin.llm_batch(
+            ranked, count, half_life=half_life, min_len=min_len, max_len=max_len,
+            db_path=db_path, api_url=url, api_key=key, model=model,
+        )
+    except Exception as exc:
+        print(f"[llm-coin] skipped this cycle: {exc.__class__.__name__}: {exc}")
+        return []
+    print(f"[llm-coin] {len(pairs)}/{count} LLM names passed the gate")
+    return pairs
+
+
 def run_continuous_loop(
     half_life: float = 25.0,
     min_len: int = 5,
@@ -540,6 +594,8 @@ def run_continuous_loop(
     batch: int = 40,
     domain_top: float = 0.25,
     concurrency: int = 4,
+    llm_share: float | None = None,
+    coin_model: str | None = None,
 ) -> None:
     """Continuously coin names, score them all, and domain-check the best slice in the background."""
     qversion = config.QUESTION_VERSION
@@ -566,6 +622,10 @@ def run_continuous_loop(
     print(f"Backend: {backend} ({model})")
     print(f"Sampling: Full scored vocabulary with rank-based exponential falloff (half-life: {half_life})")
     print(f"Length filter: {min_len} to {max_len} characters")
+    llm_share = config.COIN_LLM_SHARE if llm_share is None else llm_share
+    llm_url, llm_key, llm_model = _llm_endpoint(backend, coin_model, model_override)
+    if llm_share > 0:
+        print(f"LLM coining: {llm_share:.0%} of each cycle ({llm_model})")
     print("Press Ctrl+C anytime to stop.\n")
 
     cycle = 0
@@ -611,10 +671,24 @@ def run_continuous_loop(
                 learned = learn_weights(conn, qversion)
             if learned[0]:
                 print("[learn] engine weights: " + "  ".join(f"{e}={w:.2f}" for e, w in learned[0].items()))
-            novel_pairs = coin_stream_batch(
-                ranked, batch_size=batch, half_life=half_life, min_len=min_len, max_len=max_len,
-                db_path=db_path, learned=learned,
-            )
+            llm_n = 0
+            if llm_share > 0:
+                with db.session(db_path) as conn:
+                    mult = llm_share_multiplier(conn, qversion)
+                eff = min(0.8, llm_share * mult)
+                llm_n = round(batch * eff)
+                if mult != 1.0:
+                    print(f"[learn] llm share {eff:.0%} (x{mult:.2f} from its score vs the rule engines)")
+            novel_pairs = []
+            if batch - llm_n > 0:
+                novel_pairs = coin_stream_batch(
+                    ranked, batch_size=batch - llm_n, half_life=half_life, min_len=min_len, max_len=max_len,
+                    db_path=db_path, learned=learned,
+                )
+            if llm_n:
+                novel_pairs += _llm_pairs(
+                    ranked, llm_n, half_life, min_len, max_len, db_path, llm_url, llm_key, llm_model,
+                )
             if not novel_pairs:
                 print(f"[Cycle {cycle}] Retrying candidate generation...")
                 continue
@@ -690,6 +764,8 @@ def run(
     batch: int = 40,
     domain_top: float = 0.25,
     concurrency: int = 4,
+    llm_share: float | None = None,
+    coin_model: str | None = None,
 ) -> list[str]:
     """Main CLI entrypoint for namefinder coin."""
     if continuous:
@@ -703,6 +779,8 @@ def run(
             batch=batch,
             domain_top=domain_top,
             concurrency=concurrency,
+            llm_share=llm_share,
+            coin_model=coin_model,
         )
         return []
 
@@ -725,7 +803,15 @@ def run(
         print(f"\n=== Coining Custom Variations (Rank-Weighted Independent Sampling) ===")
         print(f"Drawing {target_count} independent candidate samples with replacement (half-life: {half_life})")
         print(f"Length filter: {min_len} to {max_len} characters\n")
-        pairs = coin_stream_batch(ranked, batch_size=target_count, half_life=half_life, min_len=min_len, max_len=max_len, db_path=db_path)
+        share = config.COIN_LLM_SHARE if llm_share is None else llm_share
+        llm_n = round(target_count * share) if share > 0 else 0
+        pairs = coin_stream_batch(ranked, batch_size=target_count - llm_n, half_life=half_life, min_len=min_len, max_len=max_len, db_path=db_path)
+        if llm_n:
+            if not backend:
+                backend = "openrouter" if config.secret(config.OPENROUTER_KEY_ENV) else "local"
+            url, key, lmodel = _llm_endpoint(backend, coin_model, model_override)
+            print(f"Asking {lmodel} for {llm_n} LLM-coined names...")
+            pairs += _llm_pairs(ranked, llm_n, half_life, min_len, max_len, db_path, url, key, lmodel)
         novel_words = [p[0] for p in pairs]
 
     if limit and len(novel_words) > limit:
