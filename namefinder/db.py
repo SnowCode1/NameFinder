@@ -133,6 +133,7 @@ SCORE_EXTRA_COLUMNS = (
     ("ambiguity", "REAL"),      # 0..1 chance a listener misspells / readers misread
     ("phonetic", "REAL"),       # 0..1 blended pronounceability
     ("refined", "INTEGER DEFAULT 0"),  # 1 once the refine pass has run
+    ("verbable", "REAL"),       # 0..1 works as a verb: "I just ___ it and found what I needed"
 )
 
 
@@ -241,14 +242,15 @@ def upsert_score(conn: sqlite3.Connection, row: dict[str, Any]) -> None:
         INSERT OR REPLACE INTO scores
             (word, qversion, model, fit, natural, spellable, memorable, neg,
              taken, common, composite, why, why_not, raw, scored_at,
-             syllables, say_aloud, misheard_as, ambiguity, phonetic, refined)
+             syllables, say_aloud, misheard_as, ambiguity, phonetic, refined, verbable)
         VALUES (:word, :qversion, :model, :fit, :natural, :spellable, :memorable,
                 :neg, :taken, :common, :composite, :why, :why_not, :raw, :scored_at,
-                :syllables, :say_aloud, :misheard_as, :ambiguity, :phonetic, :refined)
+                :syllables, :say_aloud, :misheard_as, :ambiguity, :phonetic, :refined, :verbable)
         """,
         {
             "why": None, "why_not": None, "syllables": None, "say_aloud": None,
             "misheard_as": None, "ambiguity": None, "phonetic": None, "refined": 0,
+            "verbable": None,
             **row,
         },
     )
@@ -547,6 +549,7 @@ def get_candidates_summary(
             "misheard_as": r["misheard_as"] if "misheard_as" in r.keys() else None,
             "phonetic": r["phonetic"] if "phonetic" in r.keys() else None,
             "refined": bool(r["refined"]) if "refined" in r.keys() else False,
+            "verbable": r["verbable"] if "verbable" in r.keys() else None,
         })
         if len(out) >= limit:
             break

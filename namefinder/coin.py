@@ -8,6 +8,7 @@ availability, and scores them using the calibrated brand rubric.
 from __future__ import annotations
 
 import asyncio
+import functools
 import math
 import random
 import re
@@ -226,6 +227,20 @@ def _is_real_word(w: str) -> bool:
     return zipf_frequency(w, "en") >= 2.0
 
 
+@functools.lru_cache(maxsize=None)
+def verbness(word: str) -> float:
+    """0..1: how verb-like a dictionary word is (common -ing and -ed forms), via wordfreq."""
+    try:
+        from wordfreq import zipf_frequency
+    except ImportError:  # pragma: no cover
+        return 0.0
+    w = word.lower()
+    stem = w[:-1] if w.endswith("e") else w
+    ing = max(zipf_frequency(f, "en") for f in (w + "ing", stem + "ing", w + w[-1] + "ing"))
+    ed = max(zipf_frequency(f, "en") for f in (w + "ed", w + "d" if w.endswith("e") else w + "ed", w + w[-1] + "ed"))
+    return max(0.0, min(1.0, (min(ing, ed) - 1.0) / 3.0))
+
+
 def acceptable(word: str, min_len: int = 5, max_len: int = 10) -> bool:
     """Quality gate for any coined candidate: phonotactics, pronounceability, no crude fragments."""
     if not is_pronounceable(word, min_len=min_len, max_len=max_len):
@@ -302,7 +317,8 @@ def best_splice(a: str, b: str, min_len: int, max_len: int, top: int = 3) -> str
         # keep both parents recognisable: at least 3 letters of each should survive
         if not (cand.startswith(a[:3]) or cand.startswith(b[:3])):
             continue
-        score_ = phonetics.analyze(cand).score + (0.15 if overlap else 0.0)
+        score_ = (phonetics.analyze(cand).score + (0.15 if overlap else 0.0)
+                  + config.COIN_VERB_SPLICE_WEIGHT * phonetics.verb_score(cand))
         scored.append((score_, cand))
     if not scored:
         return None
@@ -321,7 +337,7 @@ def learn_weights(conn, qversion: str) -> tuple[dict[str, float], dict[str, floa
     """
     rows = conn.execute(
         """
-        SELECT w.engine, w.parents, s.composite FROM words w
+        SELECT w.engine, w.parents, s.composite, s.verbable FROM words w
         JOIN scores s ON s.word = w.word AND s.qversion = ?
         WHERE w.source = 'coined' AND w.engine IS NOT NULL
         """,
@@ -330,14 +346,20 @@ def learn_weights(conn, qversion: str) -> tuple[dict[str, float], dict[str, floa
     if not rows:
         return {}, {}
 
+    def signal(r) -> float:
+        """Composite, amplified by how verb-like the LLM judged the name (unrated = neutral)."""
+        v = 0.5 if r["verbable"] is None else r["verbable"]
+        return r["composite"] * (1.0 + config.COIN_LEARN_VERB * (v - 0.5))
+
     by_engine: dict[str, list[float]] = {}
     by_partner: dict[str, list[float]] = {}
     for r in rows:
-        by_engine.setdefault(r["engine"], []).append(r["composite"])
+        sig = signal(r)
+        by_engine.setdefault(r["engine"], []).append(sig)
         if r["engine"] == "portmanteau" and r["parents"] and "," in r["parents"]:
-            by_partner.setdefault(r["parents"].split(",")[1], []).append(r["composite"])
+            by_partner.setdefault(r["parents"].split(",")[1], []).append(sig)
 
-    overall = statistics.fmean(r["composite"] for r in rows)
+    overall = statistics.fmean(signal(r) for r in rows)
     if overall <= 0:
         return {}, {}
     k = config.COIN_LEARN_PRIOR
@@ -415,7 +437,11 @@ def sample_one_variation(
 
         elif engine == "portmanteau":
             if random.random() < 0.5:
-                other = random.choices(CONCEPT_ROOTS, weights=[pw.get(r, 1.0) for r in CONCEPT_ROOTS], k=1)[0]
+                other = random.choices(
+                    CONCEPT_ROOTS,
+                    weights=[pw.get(r, 1.0) * (1.0 + config.COIN_VERB_PARENT_BOOST * verbness(r)) for r in CONCEPT_ROOTS],
+                    k=1,
+                )[0]
             else:
                 other = random.choices(words, weights=weights, k=1)[0]
             if other != base:
@@ -428,6 +454,11 @@ def sample_one_variation(
                 cand = base[:idx] + random.choice("aeiou") + base[idx + 1 :]
 
         if cand and cand != base and acceptable(cand, min_len=min_len, max_len=max_len):
+            # soft verb bias: unlikely verbs are dropped more often, never ruled out
+            floor = config.COIN_VERB_FLOOR
+            vs = max(0.0, (phonetics.verb_score(cand) - 0.5) / 0.5)   # 0.5 and below = worst
+            if random.random() > floor + (1.0 - floor) * vs:
+                continue
             return cand, base, engine, other
 
     return None
@@ -443,7 +474,11 @@ def coin_stream_batch(
     learned: tuple[dict[str, float], dict[str, float]] | None = None,
 ) -> list[tuple[str, str]]:
     """Sample batch_size novel variations, where each variation is its own independent base sample."""
-    weights = [2.0 ** (-i / half_life) for i in range(len(ranked_words))]
+    boost = config.COIN_VERB_PARENT_BOOST
+    weights = [
+        2.0 ** (-i / half_life) * (1.0 + boost * verbness(r["word"] if hasattr(r, "keys") else str(r)))
+        for i, r in enumerate(ranked_words)
+    ]
     with db.session(db_path) as conn:
         if learned is None:
             learned = learn_weights(conn, config.QUESTION_VERSION)

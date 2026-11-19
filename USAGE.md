@@ -126,6 +126,8 @@ namefinder coin --no-domains --no-score --limit 50
 
 Each candidate comes from one of five engines (prefix, suffix, truncation, portmanteau, vowel shift) applied to a base word sampled by rank. Portmanteaus fuse two words at vowel/consonant seams, so both parents are shortened (each keeps at least 40% of its letters) and the join alternates sounds. Every candidate passes one quality gate before it is stored or scored: pronounceability (`phonetics.py`, floor `COIN_MIN_PHONETIC`), no real English words, no crude fragments (`COIN_BLOCK_SUBSTRINGS`), and not already in the database.
 
+**Steering toward verbs.** Names that work as "I just ___ it" are favoured three ways, all tunable in `config.py` (`COIN_VERB_*`, `COIN_LEARN_VERB`): (1) a free `phonetics.verb_score` (short, hard-consonant ending, clean -ed/-ing) softly biases every engine, so unlikely verbs are kept less often but never banned, and also helps pick among splice options; (2) parents whose common -ing/-ed forms exist in wordfreq (trace, link, focus) are picked up to twice as often; (3) engine and partner learning now weights each composite by how verb-like the LLM rated the name.
+
 Each coined word records its engine and parents. Between cycles the loop re-weights engines and portmanteau partner roots by the scores their earlier words earned (shrunk toward the overall mean, with 30% kept uniform so no engine starves), and prints the engine weights each cycle.
 
 ## View Rankings and Status in CLI
@@ -210,7 +212,7 @@ namefinder refine --free-domains-only --backend openrouter --model <stronger-mod
 namefinder top --free-domains                    # shows syllables / say-aloud / sound-alike risks
 ```
 
-Pass 1 already applies a pronounceability gate and a small penalty to names that are just a generic prefix (`meta`, `pan`, `ultra`, ...) on a dictionary word. Tune both in `namefinder/config.py` (`PHONETIC_WEIGHT`, `GENERIC_PREFIX_PENALTY`). Override the review prompt with `prompts/refine_prompt.md` and `prompts/refine_user_prompt.md` (gitignored).
+Pass 1 already applies a pronounceability gate and a small penalty to names that are just a generic prefix (`meta`, `pan`, `ultra`, ...) on a dictionary word. Tune both in `namefinder/config.py` (`PHONETIC_WEIGHT`, `GENERIC_PREFIX_PENALTY`). Coined names also get a **verbable** axis (0-1): does the name work as a verb in "I just ___ it and found what I needed" (googled, pinged, grepped)? It is a slight multiplier, `composite *= (1 - VERB_BONUS) + VERB_BONUS * verbable` (default 0.08, so 0.92 to 1.0; set `VERB_BONUS = 0` to disable) and appears as the `Verb` column in `top`. Both passes ask for it; the pass-1 question is added in code, so private prompt files need no edits. Words scored before this existed show `-` and keep their old composite until re-scored or refined (a recompute treats them as 0.5). Override the review prompt with `prompts/refine_prompt.md` and `prompts/refine_user_prompt.md` (gitignored).
 
 ---
 

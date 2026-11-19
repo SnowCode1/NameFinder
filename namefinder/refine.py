@@ -36,6 +36,8 @@ DEFAULT_REFINE_PROMPT = (
     "- spellable (0.0-1.0): chance of spelling it correctly after hearing it once.\n"
     "- natural (0.0-1.0): reads like a real, serious word rather than a chimera.\n"
     "- neg (0.0-1.0): negative connotation, in English or common languages.\n"
+    "- verbable (0.0-1.0): how naturally it works as a verb in 'I just ___ it and found what I needed' "
+    "(googled, pinged, grepped). 1.0 = instantly natural; 0.0 = awkward or noun-only.\n"
     "- why_not: 3-8 words on the biggest spoken-name weakness, or empty."
 )
 
@@ -44,14 +46,14 @@ DEFAULT_REFINE_USER = """Review each candidate name for how it is spoken, heard 
 Candidates: {words}
 
 Return a JSON array, one object per candidate in the same order, with the keys in EXACTLY this order:
-"word", "syllables", "say_aloud", "heard_spelling", "misheard_as", "ambiguity", "sayable", "mishear_risk", "spellable", "natural", "neg", "why_not"
+"word", "syllables", "say_aloud", "heard_spelling", "misheard_as", "ambiguity", "sayable", "mishear_risk", "spellable", "natural", "neg", "verbable", "why_not"
 
 Return ONLY the raw JSON array. No markdown fences, no prose."""
 
 REFINE_SYSTEM_PROMPT = config.load_prompt("refine_prompt.md", DEFAULT_REFINE_PROMPT)
 REFINE_USER_PROMPT = config.load_prompt("refine_user_prompt.md", DEFAULT_REFINE_USER)
 
-NUMERIC_KEYS = ("ambiguity", "sayable", "mishear_risk", "spellable", "natural", "neg")
+NUMERIC_KEYS = ("ambiguity", "sayable", "mishear_risk", "spellable", "natural", "neg", "verbable")
 
 
 def _clamp(v: Any, lo: float = 0.0, hi: float = 1.0, default: float = 0.5) -> float:
@@ -61,24 +63,23 @@ def _clamp(v: Any, lo: float = 0.0, hi: float = 1.0, default: float = 0.5) -> fl
         return default
 
 
-def pick_candidates(conn, qversion: str, top_n: int, refresh: bool, free_domains_only: bool) -> list[str]:
-    """Best coined words that have not been refined yet."""
-    refined_clause = "" if refresh else "AND COALESCE(s.refined, 0) = 0"
-    free_clause = (
-        "AND EXISTS (SELECT 1 FROM domains d WHERE d.word = s.word AND d.status = 'available')"
-        if free_domains_only else ""
+def pick_candidates(
+    conn, qversion: str, top_n: int, refresh: bool, free_domains_only: bool,
+    all_free: bool = False, clean_only: bool = False,
+) -> list[str]:
+    """Best coined words that have not been refined yet, using the same filters as `top`."""
+    coined = {r["word"] for r in conn.execute("SELECT word FROM words WHERE source = 'coined'")}
+    items = db.get_candidates_summary(
+        conn, qversion, limit=10**9,
+        only_free_domains=free_domains_only,
+        only_clean_trademarks=clean_only,
+        all_domains_free=all_free,
     )
-    rows = conn.execute(
-        f"""
-        SELECT s.word FROM scores s
-        JOIN words w ON w.word = s.word
-        WHERE s.qversion = ? AND w.source = 'coined' {refined_clause} {free_clause}
-        ORDER BY s.composite DESC
-        LIMIT ?
-        """,
-        (qversion, top_n),
-    ).fetchall()
-    return [r["word"] for r in rows]
+    picked = [
+        it["word"] for it in items
+        if it["word"] in coined and (refresh or not it.get("refined"))
+    ]
+    return picked[:top_n]
 
 
 async def _ask(http, url, headers, model, chunk: list[str], temperature: float) -> list[dict[str, Any]] | None:
@@ -154,8 +155,9 @@ def build_row(conn, old: dict[str, Any], m: dict[str, Any], model: str = "") -> 
     natural = m.get("natural", old["natural"])
     neg = max(m.get("neg", old["neg"]), m.get("mishear_risk", 0.0))
 
+    verbable = m.get("verbable", old.get("verbable"))
     comp = score.composite_brand(
-        old["fit"], natural, spellable, old["memorable"], neg, old["taken"], old["common"]
+        old["fit"], natural, spellable, old["memorable"], neg, old["taken"], old["common"], verbable
     )
     comp = score.adjust_brand_composite(conn, word, comp, phonetic)
 
@@ -174,6 +176,7 @@ def build_row(conn, old: dict[str, Any], m: dict[str, Any], model: str = "") -> 
         "spellable": round(spellable, 4),
         "neg": round(neg, 4),
         "composite": comp,
+        "verbable": None if verbable is None else round(verbable, 4),
         "why_not": (why_not or None) and why_not[:450],
         "raw": json.dumps(raw, default=str)[:20000],
         "syllables": m.get("syllables") or det.split,
@@ -250,6 +253,8 @@ def run(
     backend: str | None = None,
     refresh: bool = False,
     free_domains_only: bool = False,
+    all_free: bool = False,
+    clean_only: bool = False,
     db_path=None,
     sample: int = 15,
     concurrency: int | None = None,
@@ -271,10 +276,10 @@ def run(
         concurrency = concurrency or config.SCORE_CONCURRENCY
 
     with db.session(db_path) as conn:
-        todo = pick_candidates(conn, qversion, top_n, refresh, free_domains_only)
+        todo = pick_candidates(conn, qversion, top_n, refresh, free_domains_only, all_free, clean_only)
 
     if not todo:
-        print("[refine] no unrefined coined words found. Run `namefinder coin` first (or use --refresh).")
+        print("[refine] no unrefined coined words match. Run `namefinder coin` first, relax the filters, or use --refresh.")
         return
 
     print(f"\n[refine] backend={backend}  model={model}  words={len(todo)}  samples={samples}")
@@ -295,5 +300,5 @@ def run(
     with db.session(db_path) as conn:
         console.show_live_top_10(
             conn, qversion, title=f"Top {sample} After Spoken-Name Review", limit=sample,
-            free_domains_only=free_domains_only,
+            free_domains_only=free_domains_only or all_free,
         )
