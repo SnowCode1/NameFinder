@@ -129,7 +129,8 @@ porn crude sexist racial slur
 
 
 # --- stage 2: brand scoring ------------------------------------------------
-SCORE_MODEL = os.getenv("OPENROUTER_MODEL") or "nvidia/nemotron-3.5-lightning:free"
+DEFAULT_MODEL = "z-ai/glm-5.3-flash"
+SCORE_MODEL = os.getenv("OPENROUTER_MODEL") or DEFAULT_MODEL
 JEV_MODEL = os.getenv("TYPESAFE_MODEL") or "jev-latest"
 # Bump this whenever questions/weights change: cached scores stop matching.
 QUESTION_VERSION = "score-2026-11-16.3"
@@ -147,7 +148,12 @@ WEIGHTS = {
     "memorable": 0.15,  # Score, normalised to 0..1
     "novelty": 0.20,    # not already a known product / place / person name
 }
-TAKEN_DAMP = 0.75      # weight of "already a known software brand"
+# "Verbability": does it work as a verb in "I just ___ it and found what I needed"
+# (google it, ping it, grep it)? Applied as a slight multiplicative bonus on brand
+# composites: composite *= (1 - VERB_BONUS) + VERB_BONUS * verbable (so 0.92..1.0).
+# Unrated words count as 0.5. 0 disables it.
+VERB_BONUS = 0.08
+TAKEN_DAMP = 0.75     # weight of "already a known software brand"
 COMMON_NAME_DAMP = 0.50
 
 
@@ -187,6 +193,11 @@ COIN_BLOCK_SUBSTRINGS = (
     "nazi", "rape", "dildo", "penis", "vagina", "sexy", "nigg",
 )
 COIN_BLOCK_EDGES = ("sex",)  # blocked only at the start or end of a word
+# Verb-likeness steering for the coining engines
+COIN_VERB_PARENT_BOOST = 1.0   # verb-like parents are up to (1 + boost)x as likely to be picked
+COIN_VERB_FLOOR = 0.35         # a candidate with verb_score 0 is kept with this probability (1.0 = no bias)
+COIN_VERB_SPLICE_WEIGHT = 0.30  # weight of verb_score when choosing among splice options
+COIN_LEARN_VERB = 1.0          # engine learning scales a composite by 1 + this * (verbable - 0.5)
 COIN_LEARN_PRIOR = 10        # pseudo-observations pulling per-engine/partner means toward the overall mean
 COIN_EXPLORE = 0.30          # share of engine sampling kept uniform so no engine is starved
 COIN_BATCH = 40              # coined words per continuous cycle
@@ -216,7 +227,7 @@ TRADEMARK_STALE_DAYS = 30
 
 # --- stage 5: final tagging ------------------------------------------------
 OPENROUTER_URL = "https://openrouter.ai/api/v1"
-OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL") or "nvidia/nemotron-3.5-lightning:free"
+OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL") or DEFAULT_MODEL
 # Optional OpenRouter routing. OPENROUTER_REASONING: "low" (default; also minimal,
 # medium, high) sets reasoning effort, "off" sends enabled=false (some endpoints
 # reject this), "on" leaves the model default. Pin providers with OPENROUTER_PROVIDER

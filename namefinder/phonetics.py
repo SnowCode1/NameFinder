@@ -163,3 +163,41 @@ def analyze(word: str) -> Phonetics:
 def phonetic_gate(score: float, weight: float = 0.3) -> float:
     """Multiplier applied to a composite: 1.0 for perfect, (1-weight) for unpronounceable."""
     return (1.0 - weight) + weight * max(0.0, min(1.0, score))
+
+
+# --- verb-likeness ----------------------------------------------------------
+# Heuristic for "I just ___ it and found what I needed": short, punchy names that
+# end on a hard consonant and take -ed / -ing cleanly (ping, grep, zoom, slack).
+_NOUNISH_ENDINGS = ("ion", "ness", "ity", "ment", "ics", "ism", "ist", "ance", "ence", "ia", "ium", "ous", "ive", "ology")
+_VERBISH_ENDINGS = ("ify", "ize", "ise", "ate")
+
+
+def verb_score(word: str) -> float:
+    """0..1 deterministic guess at how well a name works as a verb (no LLM)."""
+    w = word.lower().strip()
+    if not w:
+        return 0.0
+    n = len(syllabify(w))
+
+    length = 1.0 if 4 <= len(w) <= 7 else 0.8 if len(w) == 3 else 0.7 if len(w) == 8 else 0.4
+    syl = 1.0 if n <= 2 else 0.7 if n == 3 else 0.35
+
+    if w.endswith(_VERBISH_ENDINGS):
+        end = 0.9
+    elif w.endswith(_NOUNISH_ENDINGS):
+        end = 0.3
+    elif w[-1] in "ptkxbdgc":
+        end = 1.0
+    elif w[-1] in "lmnrszvfh" or w.endswith(("le", "ge", "ce", "se", "ze", "ve")):
+        end = 0.8
+    elif w[-1] == "e":
+        end = 0.6          # silent e: probe, trace
+    elif w[-1] == "y":
+        end = 0.55
+    else:
+        end = 0.4          # open vowel: -a, -o, -i, -u
+
+    score = 0.3 * length + 0.3 * syl + 0.4 * end
+    if len(re.search(r"[^aeiouy]*$", w).group()) >= 3:
+        score -= 0.15      # tracing a 3-consonant coda (-ed / -ing) gets clumsy
+    return round(max(0.0, min(1.0, score)), 4)

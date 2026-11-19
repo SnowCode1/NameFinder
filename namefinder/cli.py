@@ -143,8 +143,12 @@ Scoring Examples:
                        help="parallel requests for cloud backends (default: %(default)s)")
     p_ref.add_argument("--max-cost", type=float, default=None, help=_MAX_COST_HELP)
     p_ref.add_argument("--refresh", action="store_true", help="re-review words already refined")
-    p_ref.add_argument("--free-domains-only", action="store_true",
-                       help="review only coined words that have a free domain")
+    p_ref.add_argument("--free-domains", "--free-domains-only", dest="free_domains_only", action="store_true",
+                       help="review only coined words that have at least one free domain (same as `top --free-domains`)")
+    p_ref.add_argument("--all-free", action="store_true",
+                       help="review only coined words whose every checked domain is free (same as `top --all-free`)")
+    p_ref.add_argument("--clean", action="store_true",
+                       help="review only coined words clear of trademark conflicts (same as `top --clean`)")
 
     p_top = sub.add_parser("top", help="inspect candidate rankings directly in the terminal")
     _add_common(p_top)
@@ -323,7 +327,8 @@ def main(argv: list[str] | None = None) -> int:
         elif args.cmd == "refine":
             from . import refine
             refine.run(top_n=args.top_n, samples=args.samples, model=args.model, backend=args.backend,
-                       refresh=args.refresh, free_domains_only=args.free_domains_only, db_path=args.db,
+                       refresh=args.refresh, free_domains_only=args.free_domains_only,
+                       all_free=args.all_free, clean_only=args.clean, db_path=args.db,
                        concurrency=args.concurrency)
         elif args.cmd == "top":
             cmd_top(args.db, limit=args.top_count, only_free=args.free_domains, only_clean=args.clean,

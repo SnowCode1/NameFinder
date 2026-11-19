@@ -85,6 +85,15 @@ DEFAULT_ROOT_SYSTEM_PROMPT = (
     "- why_not: 3-5 words explaining limitations if any (leave empty for high-potency roots)."
 )
 
+# Appended in code (not in the prompt files) so private prompts keep working unchanged.
+VERBABLE_ADDENDUM = """
+
+Also add one more key to every object, "verbable": float between 0.0 and 1.0.
+It rates how naturally the word works as a verb in the sentence "I just ___ it and found what I needed"
+(as in "I just googled it", "I just pinged it", "I just grepped it").
+1.0 = reads instantly as a verb: short, punchy, takes -ed/-ing cleanly. 0.5 = usable but a little forced.
+0.0 = awkward or noun-only ("I just latticed it" is a 0.2). Judge the sentence, not the product fit."""
+
 ROOT_SYSTEM_PROMPT = config.load_prompt("root_prompt.md", DEFAULT_ROOT_SYSTEM_PROMPT)
 BRAND_SYSTEM_PROMPT = config.load_prompt("system_prompt.md", DEFAULT_SYSTEM_PROMPT)
 OPENROUTER_SYSTEM_PROMPT = BRAND_SYSTEM_PROMPT
@@ -116,8 +125,13 @@ def composite_brand(
     neg: float,
     taken: float,
     common: float,
+    verbable: float | None = None,
 ) -> float:
-    """Weighted sum for a standalone brand, penalizing dominant brands and generic words."""
+    """Weighted sum for a standalone brand, penalizing dominant brands and generic words.
+
+    `verbable` (0..1, None = not rated, treated as 0.5) scales the result by
+    (1 - VERB_BONUS) + VERB_BONUS * verbable, so names that work as a verb lose less.
+    """
     w = config.WEIGHTS
     novelty = (1.0 - taken * config.TAKEN_DAMP) * (1.0 - common * config.COMMON_NAME_DAMP)
     base = (
@@ -127,7 +141,11 @@ def composite_brand(
         + w["memorable"] * (memorable / 4.0)
         + w["novelty"] * novelty
     )
-    return round(base * (1.0 - neg), 4)
+    comp = base * (1.0 - neg)
+    if config.VERB_BONUS:
+        v = 0.5 if verbable is None else max(0.0, min(1.0, verbable))   # unrated = neutral
+        comp *= (1.0 - config.VERB_BONUS) + config.VERB_BONUS * v
+    return round(comp, 4)
 
 
 # Default alias
@@ -226,6 +244,9 @@ async def score_words_openrouter(
             is_root = coined_count == 0
 
         active_system_prompt = ROOT_SYSTEM_PROMPT if is_root else BRAND_SYSTEM_PROMPT
+        user_prompt = OPENROUTER_USER_PROMPT
+        if not is_root and '"verbable"' not in user_prompt:
+            user_prompt += VERBABLE_ADDENDUM.replace("{", "{{").replace("}", "}}")
 
         async with net.async_client(timeout=120.0) as http:
             def advance(n: int) -> None:
@@ -244,7 +265,7 @@ async def score_words_openrouter(
                     "model": model,
                     "messages": [
                         {"role": "system", "content": active_system_prompt},
-                        {"role": "user", "content": OPENROUTER_USER_PROMPT.format(words=", ".join(chunk))},
+                        {"role": "user", "content": user_prompt.format(words=", ".join(chunk))},
                     ],
                     "temperature": 0.2,
                     "max_tokens": 3500,
@@ -329,11 +350,18 @@ async def score_words_openrouter(
                     else:
                         why_not_text = str(why_not_raw or "").strip()[:450] or None
 
+                    verbable = None
+                    if not is_root and item.get("verbable") is not None:
+                        try:
+                            verbable = max(0.0, min(1.0, float(item["verbable"])))
+                        except (TypeError, ValueError):
+                            verbable = None
+
                     if is_root:
                         comp_score = composite_root(fit, natural, spellable, memorable, neg)
                         ph = None
                     else:
-                        comp_score = composite_brand(fit, natural, spellable, memorable, neg, taken, common)
+                        comp_score = composite_brand(fit, natural, spellable, memorable, neg, taken, common, verbable)
                         ph = phonetics.analyze(w)
                         comp_score = adjust_brand_composite(conn, w, comp_score, ph.score)
 
@@ -356,6 +384,7 @@ async def score_words_openrouter(
                         "syllables": ph.split if ph else None,
                         "ambiguity": ph.ambiguity if ph else None,
                         "phonetic": ph.score if ph else None,
+                        "verbable": verbable,
                     }
                     db.upsert_score(conn, row)
                     done += 1

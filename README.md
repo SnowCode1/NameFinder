@@ -118,7 +118,7 @@ namefinder score --backend local --limit 1000
 Add `OPENROUTER_API_KEY=your_key_here` to `.env`:
 
 ```bash
-# Score using OpenRouter (defaults to nvidia/nemotron-3.5-lightning:free):
+# Score using OpenRouter (defaults to z-ai/glm-5.3-flash):
 namefinder score --backend openrouter --limit 100
 ```
 
