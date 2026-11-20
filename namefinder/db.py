@@ -144,6 +144,10 @@ def connect(path: Path | str | None = None) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
     conn.executescript(SCHEMA)
+    # Only the currently configured domain roles count; older cached rows (e.g. .app) are ignored.
+    roles = ",".join("'" + r.replace("'", "") + "'" for r in config.active_domain_roles())
+    conn.execute("DROP VIEW IF EXISTS active_domains")
+    conn.execute(f"CREATE VIEW active_domains AS SELECT * FROM domains WHERE tld IN ({roles})")
     # Additive migrations for databases created before these columns existed
     for table, columns in (("scores", SCORE_EXTRA_COLUMNS), ("words", WORD_EXTRA_COLUMNS)):
         for col, decl in columns:
@@ -321,9 +325,9 @@ def domain_map(conn: sqlite3.Connection, words: Sequence[str] | None = None) -> 
     """Return {word: {tld_or_role: status}} for cached lookups."""
     if words:
         q = ",".join("?" * len(words))
-        rows = conn.execute(f"SELECT * FROM domains WHERE word IN ({q})", list(words)).fetchall()
+        rows = conn.execute(f"SELECT * FROM active_domains WHERE word IN ({q})", list(words)).fetchall()
     else:
-        rows = conn.execute("SELECT * FROM domains").fetchall()
+        rows = conn.execute("SELECT * FROM active_domains").fetchall()
     out: dict[str, dict[str, str]] = {}
     for r in rows:
         out.setdefault(r["word"], {})[r["tld"]] = r["status"]
@@ -340,7 +344,7 @@ def words_passing_domains(conn: sqlite3.Connection, qversion: str, limit: int | 
             SELECT s.*, MAX(CASE WHEN d.status = 'available' THEN 1 ELSE 0 END) AS any_free,
                    GROUP_CONCAT(d.tld || ':' || d.status) AS domain_state
             FROM scores s
-            JOIN domains d ON d.word = s.word
+            JOIN active_domains d ON d.word = s.word
             WHERE s.qversion = ?
             GROUP BY s.word
             HAVING any_free = 1
@@ -353,7 +357,7 @@ def words_passing_domains(conn: sqlite3.Connection, qversion: str, limit: int | 
                    MAX(CASE WHEN d.status = 'available' THEN 1 ELSE 0 END) AS any_free,
                    GROUP_CONCAT(d.tld || ':' || d.status) AS domain_state
             FROM words w
-            JOIN domains d ON d.word = w.word
+            JOIN active_domains d ON d.word = w.word
             GROUP BY w.word
             HAVING any_free = 1
             ORDER BY w.zipf DESC
@@ -414,7 +418,7 @@ def words_passing_trademarks(conn: sqlite3.Connection, qversion: str, limit: int
             ),
             d AS (
                 SELECT word, MAX(CASE WHEN status = 'available' THEN 1 ELSE 0 END) AS free
-                FROM domains GROUP BY word
+                FROM active_domains GROUP BY word
             )
             SELECT s.word, s.composite, s.fit, s.natural, s.spellable, s.memorable, d.free
             FROM scores s
@@ -439,7 +443,7 @@ def words_passing_trademarks(conn: sqlite3.Connection, qversion: str, limit: int
             ),
             d AS (
                 SELECT word, MAX(CASE WHEN status = 'available' THEN 1 ELSE 0 END) AS free
-                FROM domains GROUP BY word
+                FROM active_domains GROUP BY word
             )
             SELECT w.word, w.zipf AS composite, 0.0 AS fit, 0.0 AS natural, 0.0 AS spellable, 0.0 AS memorable, d.free
             FROM words w
@@ -471,7 +475,7 @@ def get_candidates_summary(
         word = r["word"]
         # Domains check
         dom_rows = conn.execute(
-            "SELECT tld, status FROM domains WHERE word = ? ORDER BY tld", (word,)
+            "SELECT tld, status FROM active_domains WHERE word = ? ORDER BY tld", (word,)
         ).fetchall()
         any_free = any(d["status"] == "available" for d in dom_rows)
         if only_free_domains and not any_free:

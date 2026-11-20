@@ -40,7 +40,7 @@ Standard Workflows:
      namefinder coin --bases fathom,spectral    # coin variations from specific root words
 
   3. Screen Domains & Trademarks Directly:
-     namefinder check-domains --top-n 500       # check .com, .dev, .app via keyless RDAP
+     namefinder check-domains --top-n 500       # check .com, .io, .dev via keyless RDAP
      namefinder check-trademarks --top-n 100    # check USPTO (Markbase), PyPI, GitHub
 
   4. Inspect Rankings & Export:
@@ -210,6 +210,13 @@ Coining Examples:
     p_coin.add_argument("--no-domains", action="store_true", help="skip automatic RDAP domain checks")
     p_coin.add_argument("--no-score", action="store_true", help="skip LLM brand scoring")
 
+    p_rc = sub.add_parser(
+        "recompute",
+        help="re-derive composites of coined words from stored sub-scores after changing config weights (no LLM calls)",
+    )
+    _add_common(p_rc)
+    p_rc.add_argument("--no-backup", action="store_true", help="skip the database backup before updating")
+
     p6 = sub.add_parser("status", help="show pipeline cache counts and funnel summary")
     _add_common(p6)
 
@@ -239,7 +246,7 @@ def cmd_top(db_path, limit: int = 25, only_free: bool = False, only_clean: bool 
             filter_desc.append("clean trademarks only")
         filters_str = f" ({', '.join(filter_desc)})" if filter_desc else ""
 
-        title = f"NameFinder Rankings: Top {len(items)}{filters_str}"
+        title = f"NameFinder Rankings: Top {len(items)}{filters_str}  (✓ = refined)"
         if not items:
             print(f"\n{console.yellow('No candidates match the specified criteria.')}")
             print(f"Run {console.b_cyan('namefinder score')} or {console.b_cyan('namefinder coin')} first.\n")
@@ -359,6 +366,12 @@ def main(argv: list[str] | None = None) -> int:
                 coin_model=args.coin_model,
                 db_path=args.db,
             )
+        elif args.cmd == "recompute":
+            from . import score as score_mod
+            total, changed, path = score_mod.recompute_brand(args.db, backup=not args.no_backup)
+            print(f"[recompute] {total} coined words checked, {changed} composites updated")
+            if path:
+                print(f"[recompute] backup: {path}")
         elif args.cmd == "status":
             cmd_status(args.db)
         return 0

@@ -25,7 +25,8 @@ def domains_for(word: str) -> list[tuple[str, str]]:
     out: list[tuple[str, str]] = []
     for tld in config.TLDS:
         out.append((f"{word}.{tld}", tld))
-    out.append((f"{config.USE_PREFIX}{word}.com", "use-com"))
+    if config.USE_PREFIX:
+        out.append((f"{config.USE_PREFIX}{word}.com", "use-com"))
     if config.CHECK_PLAIN_COM:
         out.append((f"{word}.com", "com"))
     return out
@@ -154,7 +155,7 @@ def run(limit: int | None = None, refresh: bool = False, db_path=None, top_n: in
             if domain not in cached:
                 jobs.append((w, domain, role))
 
-    print(f"[check-domains] words={len(words)} | queued={len(jobs)} | cached={len(words) * 4 - len(jobs)}")
+    print(f"[check-domains] words={len(words)} | queued={len(jobs)} | cached={len(words) * len(config.active_domain_roles()) - len(jobs)}")
     try:
         counts = asyncio.run(_run_async(jobs, db_path)) if jobs else {"available": 0, "registered": 0, "unknown": 0}
     except (KeyboardInterrupt, asyncio.CancelledError):

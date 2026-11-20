@@ -584,6 +584,29 @@ def _llm_pairs(ranked, count, half_life, min_len, max_len, db_path, url, key, mo
     return pairs
 
 
+DOMAIN_BATCH_TIMEOUT = 180.0  # seconds; a stuck RDAP batch is abandoned (unchecked domains retry later)
+
+
+def _wait_pending(future) -> None:
+    """Wait for a background future in short slices so Ctrl+C works on Windows.
+
+    A timed-out or failed batch is reported but never stops the loop.
+    """
+    from concurrent.futures import TimeoutError as _FutTimeout
+    while True:
+        try:
+            future.result(timeout=0.5)
+            return
+        except _FutTimeout:
+            continue
+        except (asyncio.TimeoutError, TimeoutError):
+            print("[coin] a domain batch timed out and was skipped")
+            return
+        except Exception as exc:
+            print(f"[coin] background domain check failed: {exc}")
+            return
+
+
 def run_continuous_loop(
     half_life: float = 25.0,
     min_len: int = 5,
@@ -638,7 +661,7 @@ def run_continuous_loop(
         """Words coined in this session that have at least one free domain."""
         if pending is not None:
             try:
-                pending.result()
+                _wait_pending(pending)
             except Exception as exc:  # RDAP trouble must not lose the session summary
                 print(f"[coin] background domain check failed: {exc}")
         if not session_words:
@@ -646,7 +669,7 @@ def run_continuous_loop(
         with db.session(db_path) as conn:
             marks = ",".join("?" * len(session_words))
             return conn.execute(
-                f"SELECT COUNT(DISTINCT word) FROM domains WHERE status = 'available' AND word IN ({marks})",
+                f"SELECT COUNT(DISTINCT word) FROM active_domains WHERE status = 'available' AND word IN ({marks})",
                 list(session_words),
             ).fetchone()[0]
 
@@ -713,9 +736,10 @@ def run_continuous_loop(
             with db.session(db_path) as conn:
                 scored = conn.execute(
                     """
-                    SELECT word FROM scores
-                    WHERE qversion = ? AND word IN ({})
-                    ORDER BY composite DESC
+                    SELECT s.word, s.composite, w.engine FROM scores s
+                    LEFT JOIN words w ON w.word = s.word
+                    WHERE s.qversion = ? AND s.word IN ({})
+                    ORDER BY s.composite DESC
                     """.format(",".join("?" * len(novel))),
                     [qversion, *novel],
                 ).fetchall()
@@ -724,19 +748,19 @@ def run_continuous_loop(
             if to_check:
                 jobs = [(w, dom, role) for w in to_check for dom, role in domains.domains_for(w)]
                 if pending is not None:
-                    pending.result()      # never run two RDAP batches at once (per-registry pacing)
+                    _wait_pending(pending)      # never run two RDAP batches at once (per-registry pacing)
                 pending = executor.submit(
-                    lambda j=jobs: asyncio.run(domains._run_async(j, db_path=db_path, quiet=True))
+                    lambda j=jobs: asyncio.run(
+                        asyncio.wait_for(domains._run_async(j, db_path=db_path, quiet=True), DOMAIN_BATCH_TIMEOUT)
+                    )
                 )
                 print(f"[Cycle {cycle}] Scored {len(scored)} | checking domains for top {len(to_check)} in background")
 
-            with db.session(db_path) as conn:
-                console.show_live_top_10(
-                    conn, qversion,
-                    title=f"Continuous Discovery: Top 10 Winners with Free Domains (Cycle {cycle})",
-                    free_domains_only=True,
-                )
-
+            console.print_score_grid(
+                [(r["word"], r["composite"], r["engine"] == "llm") for r in scored],
+                title=f"Cycle {cycle}: {len(scored)} scored",
+                top_checked=len(to_check),
+            )
             print("-" * 70)
 
     except (KeyboardInterrupt, asyncio.CancelledError):
@@ -835,7 +859,7 @@ def run(
         with db.session(db_path) as conn:
             passing = conn.execute(
                 """
-                SELECT word FROM domains
+                SELECT word FROM active_domains
                 WHERE word IN ({}) AND status = 'available'
                 GROUP BY word
                 """.format(",".join("?" * len(novel_words))),

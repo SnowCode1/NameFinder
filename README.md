@@ -27,8 +27,8 @@ All progress is persisted to an SQLite database (`WAL` mode) so any stage can be
 3. **Keyless Domain Screening (`check-domains`)**
    - Queries official registry RDAP servers directly over HTTPS:
      - `.com` via Verisign (`rdap.verisign.com`)
-     - `.dev` and `.app` via Google Registry (`pubapi.registry.google`)
-   - Checks `{word}.com`, `{word}.dev`, `{word}.app`, and `use{word}.com`.
+     - `.dev` via Google Registry (`pubapi.registry.google`) and `.io` via Identity Digital (`rdap.identitydigital.services`)
+   - Checks `{word}.com`, `{word}.io` and `{word}.dev` (configurable via `TLDS`, `CHECK_PLAIN_COM` and `USE_PREFIX` in `config.py`; older cached `.app` / `use` rows are ignored).
    - Rate-paced (≤ 4 req/s) with exponential backoff on HTTP 429.
 
 4. **Trademark & Namespace Clearance (`check-trademarks`)**
@@ -53,7 +53,7 @@ All progress is persisted to an SQLite database (`WAL` mode) so any stage can be
    - Displays live discovery alerts and handles `Ctrl+C` gracefully without data loss.
 
 7. **Terminal Ranking Inspector (`top`)**
-   - Displays ranked candidates directly in the terminal with live domain status (`.com`, `.dev`, `.app`), trademark flags, and model reasoning.
+   - Displays ranked candidates directly in the terminal with live domain status (`.com`, `.io`, `.dev`), trademark flags, and model reasoning.
 
 ---
 
@@ -155,7 +155,7 @@ namefinder check-trademarks --top-n 100
 # View top 25 overall candidates:
 namefinder top
 
-# View only candidates with verified free domains (.com, .dev, or .app):
+# View only candidates with verified free domains (.com, .io, or .dev):
 namefinder top --free-domains --top 50
 
 # View only candidates clear of trademark conflicts:
