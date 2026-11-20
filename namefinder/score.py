@@ -165,11 +165,54 @@ def generic_prefix_penalty(conn, word: str) -> float:
     return 0.0
 
 
+def syllable_penalty(word: str) -> float:
+    """Composite reduction for long names (see config.SYLLABLE_PENALTY)."""
+    n = len(phonetics.syllabify(word))
+    keys = [k for k in config.SYLLABLE_PENALTY if k <= n]
+    return config.SYLLABLE_PENALTY[max(keys)] if keys else 0.0
+
+
 def adjust_brand_composite(conn, word: str, comp: float, phonetic: float) -> float:
-    """Apply the pronounceability gate and the generic-prefix penalty to a brand composite."""
+    """Apply the pronounceability gate, generic-prefix penalty and syllable penalty to a brand composite."""
     gate = phonetics.phonetic_gate(phonetic, config.PHONETIC_WEIGHT)
     pen = generic_prefix_penalty(conn, word)
-    return round(comp * gate * (1.0 - pen), 4)
+    return round(comp * gate * (1.0 - pen) * (1.0 - syllable_penalty(word)), 4)
+
+
+def recompute_brand(db_path=None, backup: bool = True) -> tuple[int, int, Any]:
+    """Re-derive every coined word's composite from its stored sub-scores (no LLM calls).
+
+    Use after changing weights or penalties in config.py. Returns (words, changed, backup_path).
+    """
+    qversion = config.QUESTION_VERSION
+    with db.session(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT s.* FROM scores s JOIN words w ON w.word = s.word
+            WHERE s.qversion = ? AND w.source = 'coined'
+            """,
+            (qversion,),
+        ).fetchall()
+        updates = []
+        for r in rows:
+            comp = composite_brand(
+                r["fit"], r["natural"], r["spellable"], r["memorable"], r["neg"],
+                r["taken"], r["common"], r["verbable"],
+            )
+            phonetic = r["phonetic"] if r["phonetic"] is not None else phonetics.analyze(r["word"]).score
+            new = adjust_brand_composite(conn, r["word"], comp, phonetic)
+            if abs(new - (r["composite"] or 0.0)) > 5e-4:
+                updates.append((new, r["word"]))
+        path = None
+        if updates:
+            if backup:
+                path = db.backup_database(conn)
+            conn.executemany(
+                "UPDATE scores SET composite = ? WHERE word = ? AND qversion = ?",
+                [(c, w, qversion) for c, w in updates],
+            )
+            conn.commit()
+    return len(rows), len(updates), path
 
 
 def _parse_scores(content: str | None) -> list[dict[str, Any]] | None:
@@ -468,7 +511,7 @@ def run(
             conn.commit()
             if free_domains_only:
                 todo = [r["word"] for r in conn.execute(
-                    f"SELECT w.word FROM words w JOIN domains d ON d.word = w.word WHERE d.status = 'available' {coined_clause} GROUP BY w.word ORDER BY w.zipf DESC"
+                    f"SELECT w.word FROM words w JOIN active_domains d ON d.word = w.word WHERE d.status = 'available' {coined_clause} GROUP BY w.word ORDER BY w.zipf DESC"
                 ).fetchall()]
             else:
                 todo = [r["word"] for r in conn.execute(
@@ -481,7 +524,7 @@ def run(
                 todo = [r["word"] for r in conn.execute(
                     f"""
                     SELECT w.word FROM words w
-                    JOIN domains d ON d.word = w.word AND d.status = 'available'
+                    JOIN active_domains d ON d.word = w.word AND d.status = 'available'
                     LEFT JOIN scores s ON s.word = w.word AND s.qversion = ?
                     WHERE s.word IS NULL {coined_clause}
                     GROUP BY w.word

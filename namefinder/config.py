@@ -164,6 +164,9 @@ GENERIC_PREFIX_PENALTY = {   # prefix -> composite multiplier reduction
     "inter": 0.05, "syn": 0.04, "neo": 0.05, "sub": 0.04, "co": 0.04,
     "con": 0.03, "re": 0.03, "in": 0.03, "per": 0.03, "epi": 0.03,
 }
+# Brevity: spoken brand names win at one or two syllables. Composite multiplier
+# reduction by syllable count (the largest key <= the count applies). {} disables it.
+SYLLABLE_PENALTY = {3: 0.04, 4: 0.10}
 # Refine pass (second pass over the top coined words)
 REFINE_MODEL = os.getenv("OPENROUTER_REFINE_MODEL") or SCORE_MODEL
 REFINE_TOP_N = 100
@@ -171,19 +174,33 @@ REFINE_SAMPLES = 3
 
 
 # --- stage 3: domains ------------------------------------------------------
-TLDS = ("dev", "app")
-USE_PREFIX = "use"          # use<word>.com
+TLDS = ("io", "dev")        # checked as <word>.<tld>
+USE_PREFIX = ""             # set to "use" to also check use<word>.com
 CHECK_PLAIN_COM = True      # <word>.com
+
+
+def active_domain_roles() -> tuple[str, ...]:
+    """Domain roles currently being checked; older cached rows for other roles are ignored."""
+    roles = list(TLDS)
+    if USE_PREFIX:
+        roles.append("use-com")
+    if CHECK_PLAIN_COM:
+        roles.append("com")
+    return tuple(roles)
+
+
 RDAP_ENDPOINTS = {
     "com": "https://rdap.verisign.com/com/v1/domain/{domain}",
     "dev": "https://pubapi.registry.google/rdap/domain/{domain}",
     "app": "https://pubapi.registry.google/rdap/domain/{domain}",
+    "io": "https://rdap.identitydigital.services/rdap/domain/{domain}",
 }
-REGISTRY_BY_TLD = {"com": "verisign", "dev": "google", "app": "google"}
+REGISTRY_BY_TLD = {"com": "verisign", "dev": "google", "app": "google", "io": "identitydigital"}
 RDAP_RATE_PER_SEC = 2.0     # default cap per registry
 # Measured: Verisign (.com) handled 10 req/s cleanly; Google's registry (.dev/.app)
 # returned 429s at 3 req/s, so it stays at 2.
-RDAP_RATE_BY_REGISTRY = {"verisign": 8.0, "google": 2.0}
+# Identity Digital (.io) measured clean at 8 req/s.
+RDAP_RATE_BY_REGISTRY = {"verisign": 8.0, "google": 2.0, "identitydigital": 8.0}
 # Coining quality gates and learning
 COIN_MIN_PHONETIC = 0.70     # reject coined candidates below this pronounceability score
 # Unambiguous crude/embarrassing fragments (checked as substrings). Deliberately

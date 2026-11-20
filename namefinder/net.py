@@ -52,7 +52,7 @@ def backoff_delay(attempt: int, retry_after: str | None = None) -> float:
     """Honour Retry-After when present, else exponential with jitter."""
     if retry_after:
         try:
-            return max(0.0, float(retry_after))
+            return min(30.0, max(0.0, float(retry_after)))  # a registry must not stall us for minutes
         except ValueError:
             pass
     return min(60.0, (2 ** attempt) * 0.75) + random.uniform(0, 0.4)

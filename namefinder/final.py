@@ -109,7 +109,7 @@ def call_openrouter(http: httpx.Client, words: list[str], model: str) -> list[di
 
 def _domain_cell(conn, word: str) -> str:
     rows = conn.execute(
-        "SELECT tld, status FROM domains WHERE word = ? ORDER BY tld", (word,)
+        "SELECT tld, status FROM active_domains WHERE word = ? ORDER BY tld", (word,)
     ).fetchall()
     label = {"available": "FREE", "registered": "taken", "unknown": "?"}
     return " ".join(f"{r['tld']}={label.get(r['status'], r['status'])}" for r in rows) or "-"

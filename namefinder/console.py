@@ -184,7 +184,7 @@ def build_rich_table(
     )
 
     t.add_column("#", justify="right", style="bold cyan", no_wrap=True, min_width=3)
-    t.add_column("Candidate", style="bold white", no_wrap=True, min_width=14)
+    t.add_column("Candidate", style="bold white", no_wrap=True, min_width=16)
     t.add_column("Score", justify="center", no_wrap=True, min_width=7)
     t.add_column("Fit", justify="center", no_wrap=True, min_width=5)
     t.add_column("Nat", justify="center", no_wrap=True, min_width=5)
@@ -210,6 +210,8 @@ def build_rich_table(
 
         sound = r.get("say_aloud") or r.get("syllables")
         cand_cell = f"[bold white]{word}[/]"
+        if r.get("refined"):
+            cand_cell += " [bold green]✓[/]"
         if sound and sound != word:
             cand_cell += f"\n[dim]{sound}[/]"
         row_cells = [
@@ -276,10 +278,10 @@ def show_live_top_10(
     """Fetch and display the live top 10 candidates directly from SQLite."""
     if free_domains_only:
         sql = """
-            SELECT s.word, s.composite, s.fit, s.natural, s.why, s.why_not, s.syllables, s.say_aloud, s.misheard_as, s.verbable,
+            SELECT s.word, s.composite, s.fit, s.natural, s.why, s.why_not, s.syllables, s.say_aloud, s.misheard_as, s.verbable, s.refined,
                    GROUP_CONCAT(d.tld || ':' || d.status) AS domain_state
             FROM scores s
-            JOIN domains d ON d.word = s.word
+            JOIN active_domains d ON d.word = s.word
             WHERE s.qversion = ?
             GROUP BY s.word
             HAVING MAX(CASE WHEN d.status = 'available' THEN 1 ELSE 0 END) = 1
@@ -289,8 +291,8 @@ def show_live_top_10(
         rows = conn.execute(sql, (qversion, limit)).fetchall()
     else:
         sql = """
-            SELECT s.word, s.composite, s.fit, s.natural, s.why, s.why_not, s.syllables, s.say_aloud, s.misheard_as, s.verbable,
-                   (SELECT GROUP_CONCAT(d.tld || ':' || d.status) FROM domains d WHERE d.word = s.word) AS domain_state
+            SELECT s.word, s.composite, s.fit, s.natural, s.why, s.why_not, s.syllables, s.say_aloud, s.misheard_as, s.verbable, s.refined,
+                   (SELECT GROUP_CONCAT(d.tld || ':' || d.status) FROM active_domains d WHERE d.word = s.word) AS domain_state
             FROM scores s
             WHERE s.qversion = ?
             ORDER BY s.composite DESC
@@ -300,6 +302,47 @@ def show_live_top_10(
 
     if rows:
         print_leaderboard(rows, title=title, limit=limit)
+
+
+def print_score_grid(
+    items: Sequence[tuple[str, float, bool]],
+    title: str = "",
+    top_checked: int = 0,
+) -> None:
+    """Compact multi-column list of (word, composite, is_llm), best first, reading down each column.
+
+    Words in the best `top_checked` get a domain check, so they are underlined.
+    """
+    if not items:
+        return
+    items = sorted(items, key=lambda t: -t[1])
+    wlen = max(len(w) for w, _, _ in items)
+    cell = wlen + 8                      # word + marker + space + score
+    gap = 3
+    width = _console.width
+    cols = max(1, min(5, (width + gap) // (cell + gap)))
+    rows = -(-len(items) // cols)
+
+    hint = "[dim]* LLM-coined, underlined = domain-checked[/]" if any(i[2] for i in items) else \
+        "[dim]underlined = domain-checked[/]"
+    _console.print(f"[bold cyan]{title}[/]  {hint}" if title else hint)
+    for r in range(rows):
+        line = Text()
+        for c in range(cols):
+            idx = c * rows + r
+            if idx >= len(items):
+                break
+            word, comp, llm = items[idx]
+            comp = comp or 0.0
+            color = "bold green" if comp >= 0.85 else "bold cyan" if comp >= 0.70 else "yellow" if comp >= 0.50 else "dim"
+            word_style = "bold white underline" if idx < top_checked else "white"
+            if c:
+                line.append(" " * gap)
+            line.append(word, style=word_style)
+            line.append(" " * (wlen - len(word)))
+            line.append("*" if llm else " ", style="magenta")
+            line.append(f" {comp:.3f}", style=color)
+        _console.print(line)
 
 
 class CostColumn(ProgressColumn):
@@ -348,10 +391,10 @@ class LiveScoringDashboard:
         with db.session(self.db_path) as conn:
             if self.free_domains_only:
                 sql = """
-                    SELECT s.word, s.composite, s.fit, s.natural, s.why, s.why_not, s.syllables, s.say_aloud, s.misheard_as, s.verbable,
+                    SELECT s.word, s.composite, s.fit, s.natural, s.why, s.why_not, s.syllables, s.say_aloud, s.misheard_as, s.verbable, s.refined,
                            GROUP_CONCAT(d.tld || ':' || d.status) AS domain_state
                     FROM scores s
-                    JOIN domains d ON d.word = s.word
+                    JOIN active_domains d ON d.word = s.word
                     WHERE s.qversion = ?
                     GROUP BY s.word
                     HAVING MAX(CASE WHEN d.status = 'available' THEN 1 ELSE 0 END) = 1
@@ -361,8 +404,8 @@ class LiveScoringDashboard:
                 return conn.execute(sql, (self.qversion, limit)).fetchall()
             else:
                 sql = """
-                    SELECT s.word, s.composite, s.fit, s.natural, s.why, s.why_not, s.syllables, s.say_aloud, s.misheard_as, s.verbable,
-                           (SELECT GROUP_CONCAT(d.tld || ':' || d.status) FROM domains d WHERE d.word = s.word) AS domain_state
+                    SELECT s.word, s.composite, s.fit, s.natural, s.why, s.why_not, s.syllables, s.say_aloud, s.misheard_as, s.verbable, s.refined,
+                           (SELECT GROUP_CONCAT(d.tld || ':' || d.status) FROM active_domains d WHERE d.word = s.word) AS domain_state
                     FROM scores s
                     WHERE s.qversion = ?
                     ORDER BY s.composite DESC

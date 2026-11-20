@@ -78,7 +78,7 @@ namefinder prepare
 # 2. Score dictionary words
 namefinder score --backend local --limit 100
 
-# 3. Check domains via keyless RDAP (.com, .dev, .app)
+# 3. Check domains via keyless RDAP (.com, .io, .dev)
 namefinder check-domains --top-n 200
 
 # 4. Check USPTO trademarks (Markbase), PyPI, and GitHub
@@ -126,6 +126,8 @@ namefinder coin --no-domains --no-score --limit 50
 
 Each candidate comes from one of five engines (prefix, suffix, truncation, portmanteau, vowel shift) applied to a base word sampled by rank. Portmanteaus fuse two words at vowel/consonant seams, so both parents are shortened (each keeps at least 40% of its letters) and the join alternates sounds. Every candidate passes one quality gate before it is stored or scored: pronounceability (`phonetics.py`, floor `COIN_MIN_PHONETIC`), no real English words, no crude fragments (`COIN_BLOCK_SUBSTRINGS`), and not already in the database.
 
+**Brevity and recomputing.** Brand composites carry a syllable penalty (`SYLLABLE_PENALTY` in `config.py`: 4% off for 3 syllables, 10% for 4+). After changing any weight or penalty in `config.py`, run `namefinder recompute` to re-derive every coined word's composite from its stored sub-scores. It makes no LLM calls and backs up the DB first (`--no-backup` to skip). Words with no verbable rating are treated as 0.5, so the first recompute also lowers unrated words by 4%.
+
 **Steering toward verbs.** Names that work as "I just ___ it" are favoured three ways, all tunable in `config.py` (`COIN_VERB_*`, `COIN_LEARN_VERB`): (1) a free `phonetics.verb_score` (short, hard-consonant ending, clean -ed/-ing) softly biases every engine, so unlikely verbs are kept less often but never banned, and also helps pick among splice options; (2) parents whose common -ing/-ed forms exist in wordfreq (trace, link, focus) are picked up to twice as often; (3) engine and partner learning now weights each composite by how verb-like the LLM rated the name.
 
 **LLM coining (`engine='llm'`).** A sixth engine asks a model to invent names from your top base words. `--llm-share` (default 0.3, `0` disables) sets the fraction of each batch it supplies; `--coin-model` / `OPENROUTER_COIN_MODEL` picks its model (default: the scoring model). The model only proposes: every name goes through the same quality gate, de-duplication, scoring, domain check and engine learning as the rule engines, and is stored with its parent word. Two feedback loops run automatically: the prompt shows the model your best and worst earlier LLM names plus the names the filters recently rejected, and once 15+ rated LLM names exist its share is scaled between 0.5x and 2x by how they score against the rule engines (printed as `[learn] llm share`). Override the system prompt with `prompts/coin_prompt.md` (gitignored). A failed LLM request never stops the loop. It runs under the same `--max-cost`. One-shot `coin --limit N` uses it too; `--bases` runs stay rule-only.
@@ -138,7 +140,7 @@ Each coined word records its engine and parents. Between cycles the loop re-weig
 # View top 25 overall candidates in terminal:
 namefinder top
 
-# View only candidates with verified free domains (.com, .dev, or .app):
+# View only candidates with verified free domains (.com, .io, or .dev):
 namefinder top --free-domains
 
 # View only candidates clear of trademark conflicts:
