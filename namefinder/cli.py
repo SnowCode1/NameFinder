@@ -48,6 +48,7 @@ Standard Workflows:
   4. Inspect Rankings & Export:
      namefinder top --free-domains              # view top brands with verified available domains
      namefinder top --clean                     # view top brands clear of trademark conflicts
+     namefinder bases                           # which base words produce top-tier coined names
      namefinder rank-final --skip-llm           # export shortlist.md / shortlist.csv to results/
      namefinder status                          # view pipeline cache & database status
      namefinder score --clear                   # wipe cached scores to start fresh
@@ -170,6 +171,19 @@ Scoring Examples:
     p_top.add_argument("--new", dest="new_only", action="store_true",
                        help="show only names marked NEW or REF within the --since window")
 
+    p_bases = sub.add_parser(
+        "bases",
+        help="rank base words by how often their coined names reach the top tier (what the coin bandit uses)",
+    )
+    _add_common(p_bases)
+    p_bases.add_argument("--top", "-n", dest="top_count", type=int, default=30,
+                         help="how many bases to show (default: %(default)s)")
+    p_bases.add_argument("--sort", choices=["rate", "recent", "best", "names", "hits"], default="rate",
+                         help="sort key: shrunk tail rate (default), recent-window rate, best score, "
+                              "name count or hit count")
+    p_bases.add_argument("--min-names", type=int, default=0,
+                         help="hide bases with fewer scored coined names than this")
+
     p_coin = sub.add_parser(
         "coin",
         help="programmatically generate and clear novel brand variations",
@@ -178,6 +192,9 @@ Scoring Examples:
 Coining Examples:
   # Continuous autonomous discovery loop (press Ctrl+C anytime to pause):
   namefinder coin --continuous --backend local
+
+  # Continuous loop focused on one root (blends may still pair it with any other word):
+  namefinder coin --continuous --bases root
 
   # Draw 30 independent variations across full ranking (exponential decay half-life 25):
   namefinder coin --limit 30 --backend local
@@ -191,7 +208,8 @@ Coining Examples:
     )
     _add_common(p_coin)
     p_coin.add_argument("--bases", type=str, default=None,
-                        help="comma-separated base words (e.g. spectral,quartz,atlas,fathom)")
+                        help="comma-separated base words (e.g. spectral,quartz,atlas,fathom); with --continuous, "
+                             "every name is built on these while blends may pair them with any other word")
     p_coin.add_argument("--top-bases", type=int, default=25,
                         help="how many base words to sample across vocabulary (default: 25)")
     p_coin.add_argument("--half-life", type=float, default=25.0,
@@ -206,7 +224,7 @@ Coining Examples:
                         help="coined words per continuous cycle (default: %(default)s)")
     p_coin.add_argument("--domain-top", type=float, default=config.COIN_DOMAIN_TOP,
                         help="fraction of each cycle (best scores) to domain-check; 1.0 = all (default: %(default)s)")
-    p_coin.add_argument("--concurrency", type=int, default=4,
+    p_coin.add_argument("--concurrency", type=int, default=config.COIN_CONCURRENCY,
                         help="parallel scoring requests per cycle (default: %(default)s)")
     p_coin.add_argument("--model", default=None, help="model id override for scoring coined words")
     p_coin.add_argument("--llm-share", type=float, default=config.COIN_LLM_SHARE,
@@ -304,6 +322,28 @@ def cmd_top(db_path, limit: int = 25, only_free: bool = False, only_clean: bool 
         )
 
 
+def cmd_bases(db_path, limit: int = 30, sort: str = "rate", min_names: int = 0) -> None:
+    from . import bases
+    with db.session(db_path) as conn:
+        stats, thr = bases.base_stats(conn, config.QUESTION_VERSION)
+    rows = [s for s in stats.values() if s.n >= min_names]
+    if not rows:
+        print(f"\n{console.yellow('No scored coined names with a recorded base yet.')}\n")
+        return
+    key = {
+        "rate": lambda s: s.rate, "recent": lambda s: s.recent_rate, "best": lambda s: s.best,
+        "names": lambda s: s.n, "hits": lambda s: s.hits,
+    }[sort]
+    rows.sort(key=key, reverse=True)
+    a, b = config.BASE_PRIOR
+    top_pct = round((1 - config.BASE_TAIL_QUANTILE) * 100)
+    console.print_base_table(
+        rows[:limit], thr,
+        title=f"Base value: {len(rows)} bases, a hit = top {top_pct}% of coined names "
+              f"(rate = (hits+{a})/(names+{a + b}); recent = last {config.BASE_WINDOW} names, red = running dry)",
+    )
+
+
 def cmd_status(db_path) -> None:
     with db.session(db_path) as conn:
         def one(sql, *args):
@@ -388,6 +428,8 @@ def main(argv: list[str] | None = None) -> int:
             cmd_top(args.db, limit=args.top_count, only_free=args.free_domains, only_clean=args.clean,
                     bases_only=args.bases_only, all_free=args.all_free,
                     since=args.since, new_only=args.new_only)
+        elif args.cmd == "bases":
+            cmd_bases(args.db, limit=args.top_count, sort=args.sort, min_names=args.min_names)
         elif args.cmd == "coin":
             from . import coin
             bases_list = [b.strip() for b in args.bases.split(",")] if args.bases else None

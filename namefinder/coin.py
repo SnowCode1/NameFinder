@@ -360,13 +360,41 @@ def llm_share_multiplier(conn, qversion: str, min_each: int = 15) -> float:
     return max(0.5, min(2.0, ratio ** 2))
 
 
-def parent_weights(ranked_words: Sequence[Any], half_life: float) -> list[float]:
-    """Rank-based exponential falloff, boosted for verb-like parents."""
+def parent_weights(ranked_words: Sequence[Any], half_life: float, bandit=None) -> list[float]:
+    """Rank-based exponential falloff, boosted for verb-like parents.
+
+    With a `bases.Bandit`, each base is also scaled by its Thompson draw, and the rank prior
+    fades as the base gathers evidence (half its log-influence after BASE_RANK_FADE names),
+    so a proven base deep in the dictionary ranking can still be picked often.
+    """
     boost = config.COIN_VERB_PARENT_BOOST
-    return [
-        2.0 ** (-i / half_life) * (1.0 + boost * verbness(r["word"] if hasattr(r, "keys") else str(r)))
-        for i, r in enumerate(ranked_words)
-    ]
+    k = config.BASE_RANK_FADE
+    out = []
+    for i, r in enumerate(ranked_words):
+        w = r["word"] if hasattr(r, "keys") else str(r)
+        fade = k / (bandit.evidence(w) + k) if bandit else 1.0
+        weight = 2.0 ** (-i * fade / half_life) * (1.0 + boost * verbness(w))
+        out.append(weight * bandit.factor(w) if bandit else weight)
+    return out
+
+
+def _bandit(conn, qversion: str):
+    """This cycle's base bandit draw, or None when disabled."""
+    if not config.BASE_BANDIT:
+        return None
+    from . import bases
+    return bases.thompson(conn, qversion)
+
+
+def _print_bandit(bandit, focus: Sequence[str] | None = None) -> None:
+    if not bandit:
+        return
+    if focus:
+        shown = [(f, bandit.factor(f)) for f in focus] if len(focus) > 1 else []
+    else:
+        shown = bandit.favoured(6)
+    if shown:
+        print("[learn] bases favoured: " + "  ".join(f"{w} x{m:.1f}" for w, m in shown))
 
 
 def learn_weights(conn, qversion: str) -> tuple[dict[str, float], dict[str, float]]:
@@ -437,16 +465,23 @@ def sample_one_variation(
     max_attempts: int = 30,
     engine_weights: dict[str, float] | None = None,
     partner_weights: dict[str, float] | None = None,
+    focus: Sequence[str] | None = None,
+    focus_weights: Sequence[float] | None = None,
 ) -> tuple[str, str, str, str | None] | None:
     """Sample one base word and generate a single valid variation.
 
+    With `focus`, the base is always one of those words (weighted by `focus_weights` if given),
+    while portmanteau partners still come from the whole ranking and the concept roots.
     Returns (candidate, base, engine, partner); partner is only set for portmanteaus.
     """
     words = [r["word"] if hasattr(r, "__getitem__") else str(r) for r in ranked_words]
     ew = [(engine_weights or {}).get(e, 1.0) for e in ENGINES]
     pw = partner_weights or {}
     for _ in range(max_attempts):
-        base = random.choices(words, weights=weights, k=1)[0]
+        if focus:
+            base = random.choices(focus, weights=focus_weights, k=1)[0]
+        else:
+            base = random.choices(words, weights=weights, k=1)[0]
         engine = random.choices(ENGINES, weights=ew, k=1)[0]
         cand = None
         other = None
@@ -508,9 +543,12 @@ def coin_stream_batch(
     max_len: int = 10,
     db_path=None,
     learned: tuple[dict[str, float], dict[str, float]] | None = None,
+    focus: Sequence[str] | None = None,
+    bandit=None,
 ) -> list[tuple[str, str]]:
     """Sample batch_size novel variations, where each variation is its own independent base sample."""
-    weights = parent_weights(ranked_words, half_life)
+    weights = parent_weights(ranked_words, half_life, bandit)
+    focus_w = [bandit.factor(f) for f in focus] if (focus and bandit) else None
     with db.session(db_path) as conn:
         if learned is None:
             learned = learn_weights(conn, config.QUESTION_VERSION)
@@ -525,7 +563,7 @@ def coin_stream_batch(
         attempts += 1
         res = sample_one_variation(
             ranked_words, weights, min_len=min_len, max_len=max_len,
-            engine_weights=engine_w, partner_weights=partner_w,
+            engine_weights=engine_w, partner_weights=partner_w, focus=focus, focus_weights=focus_w,
         )
         if res:
             cand, base, engine, other = res
@@ -569,13 +607,15 @@ def _llm_endpoint(backend: str | None, coin_model: str | None, model_override: s
     return None, None, coin_model or config.COIN_MODEL
 
 
-def _llm_pairs(ranked, count, half_life, min_len, max_len, db_path, url, key, model) -> list[tuple[str, str]]:
+def _llm_pairs(ranked, count, half_life, min_len, max_len, db_path, url, key, model,
+               focus=None, concurrency: int = 3, bandit=None) -> list[tuple[str, str]]:
     """LLM-coined (name, parent) pairs; a failure here must never stop the coining loop."""
     from . import llmcoin
     try:
         pairs = llmcoin.llm_batch(
             ranked, count, half_life=half_life, min_len=min_len, max_len=max_len,
-            db_path=db_path, api_url=url, api_key=key, model=model,
+            db_path=db_path, api_url=url, api_key=key, model=model, focus=focus,
+            concurrency=concurrency, bandit=bandit,
         )
     except Exception as exc:
         print(f"[llm-coin] skipped this cycle: {exc.__class__.__name__}: {exc}")
@@ -616,12 +656,18 @@ def run_continuous_loop(
     model_override: str | None = None,
     batch: int = 40,
     domain_top: float = 0.25,
-    concurrency: int = 4,
+    concurrency: int = config.COIN_CONCURRENCY,
     llm_share: float | None = None,
     coin_model: str | None = None,
+    focus: Sequence[str] | None = None,
 ) -> None:
-    """Continuously coin names, score them all, and domain-check the best slice in the background."""
+    """Continuously coin names, score them all, and domain-check the best slice in the background.
+
+    `focus` pins the base word(s) every name is built from; portmanteau partners and
+    concept roots still come from the whole vocabulary.
+    """
     qversion = config.QUESTION_VERSION
+    focus = [f.strip().lower() for f in focus if f.strip()] if focus else None
 
     # Determine backend & model
     if not backend:
@@ -643,7 +689,10 @@ def run_continuous_loop(
     print("=== NameFinder Continuous Coining & Discovery Engine ===")
     print("=" * 70)
     print(f"Backend: {backend} ({model})")
-    print(f"Sampling: Full scored vocabulary with rank-based exponential falloff (half-life: {half_life})")
+    if focus:
+        print(f"Focus: every name is built on {', '.join(focus)}; blends may pair it with any other word")
+    else:
+        print(f"Sampling: Full scored vocabulary with rank-based exponential falloff (half-life: {half_life})")
     print(f"Length filter: {min_len} to {max_len} characters")
     llm_share = config.COIN_LLM_SHARE if llm_share is None else llm_share
     llm_url, llm_key, llm_model = _llm_endpoint(backend, coin_model, model_override)
@@ -688,12 +737,19 @@ def run_continuous_loop(
             if not ranked:
                 print("[coin] no scored words in database yet. Run `namefinder score` first.")
                 break
+            if focus and cycle == 1:
+                known_roots = {r["word"] for r in ranked}
+                missing = [f for f in focus if f not in known_roots]
+                if missing:
+                    print(f"[coin] note: {', '.join(missing)} not among scored dictionary words; using as-is")
 
             # 2. Draw novel variations where every single variation is an independent sample with replacement
             with db.session(db_path) as conn:
                 learned = learn_weights(conn, qversion)
+                bandit = _bandit(conn, qversion)
             if learned[0]:
                 print("[learn] engine weights: " + "  ".join(f"{e}={w:.2f}" for e, w in learned[0].items()))
+            _print_bandit(bandit, focus)
             llm_n = 0
             if llm_share > 0:
                 with db.session(db_path) as conn:
@@ -706,11 +762,17 @@ def run_continuous_loop(
             if batch - llm_n > 0:
                 novel_pairs = coin_stream_batch(
                     ranked, batch_size=batch - llm_n, half_life=half_life, min_len=min_len, max_len=max_len,
-                    db_path=db_path, learned=learned,
+                    db_path=db_path, learned=learned, focus=focus, bandit=bandit,
                 )
+                shortfall = batch - llm_n - len(novel_pairs)
+                if focus and shortfall > 0 and llm_share > 0:
+                    # few roots exhaust the rule engines; let the LLM fill the gap
+                    llm_n += shortfall
+                    print(f"[coin] rule engines short by {shortfall}; asking the LLM for {llm_n}")
             if llm_n:
                 novel_pairs += _llm_pairs(
                     ranked, llm_n, half_life, min_len, max_len, db_path, llm_url, llm_key, llm_model,
+                    focus=focus, concurrency=concurrency, bandit=bandit,
                 )
             if not novel_pairs:
                 print(f"[Cycle {cycle}] Retrying candidate generation...")
@@ -787,13 +849,14 @@ def run(
     model_override: str | None = None,
     batch: int = 40,
     domain_top: float = 0.25,
-    concurrency: int = 4,
+    concurrency: int = config.COIN_CONCURRENCY,
     llm_share: float | None = None,
     coin_model: str | None = None,
 ) -> list[str]:
     """Main CLI entrypoint for namefinder coin."""
     if continuous:
         run_continuous_loop(
+            focus=bases,
             half_life=half_life,
             min_len=min_len,
             max_len=max_len,
@@ -821,6 +884,7 @@ def run(
     else:
         with db.session(db_path) as conn:
             ranked = db.ranked_words(conn, qversion, limit=None, dict_only=True)
+            bandit = _bandit(conn, qversion)
         if not ranked:
             raise SystemExit("[coin] no base words found. Provide --bases or run `namefinder score` first.")
         target_count = limit or (top_base_count * 2)
@@ -829,13 +893,14 @@ def run(
         print(f"Length filter: {min_len} to {max_len} characters\n")
         share = config.COIN_LLM_SHARE if llm_share is None else llm_share
         llm_n = round(target_count * share) if share > 0 else 0
-        pairs = coin_stream_batch(ranked, batch_size=target_count - llm_n, half_life=half_life, min_len=min_len, max_len=max_len, db_path=db_path)
+        pairs = coin_stream_batch(ranked, batch_size=target_count - llm_n, half_life=half_life, min_len=min_len, max_len=max_len, db_path=db_path, bandit=bandit)
         if llm_n:
             if not backend:
                 backend = "openrouter" if config.secret(config.OPENROUTER_KEY_ENV) else "local"
             url, key, lmodel = _llm_endpoint(backend, coin_model, model_override)
             print(f"Asking {lmodel} for {llm_n} LLM-coined names...")
-            pairs += _llm_pairs(ranked, llm_n, half_life, min_len, max_len, db_path, url, key, lmodel)
+            pairs += _llm_pairs(ranked, llm_n, half_life, min_len, max_len, db_path, url, key, lmodel,
+                                bandit=bandit)
         novel_words = [p[0] for p in pairs]
 
     if limit and len(novel_words) > limit:
