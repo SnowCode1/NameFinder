@@ -48,17 +48,31 @@ STYLE_ANCHORS = "ping, grep, zoom, slack, figma, notion, vercel, sentry"
 _RECENT_REJECTS: deque[str] = deque(maxlen=24)
 
 
-def feedback_examples(conn, qversion: str, n: int = 6) -> tuple[list[str], list[str]]:
-    """(best, worst) recent LLM-coined names by composite; falls back to the best coined names overall."""
+def _first_parent(parents: str | None) -> str:
+    return (parents or "").split(",")[0]
+
+
+def feedback_examples(
+    conn, qversion: str, n: int = 6, focus: Sequence[str] | None = None,
+) -> tuple[list[str], list[str]]:
+    """(best, worst) recent LLM-coined names by composite; falls back to the best coined names overall.
+
+    With `focus`, only names built on those bases count (any engine, so the model sees what
+    works for this root); too few of them falls back to the global picture.
+    """
     rows = conn.execute(
         """
-        SELECT w.word, w.engine, s.composite FROM words w
+        SELECT w.word, w.engine, w.parents, s.composite FROM words w
         JOIN scores s ON s.word = w.word AND s.qversion = ?
         WHERE w.source = 'coined'
         ORDER BY s.composite DESC
         """,
         (qversion,),
     ).fetchall()
+    if focus:
+        scoped = [r["word"] for r in rows if _first_parent(r["parents"]) in focus]
+        if len(scoped) >= 2 * n:
+            return scoped[:n], scoped[-n:]
     llm = [r["word"] for r in rows if r["engine"] == "llm"]
     if len(llm) >= 2 * n:
         return llm[:n], llm[-n:]
@@ -66,9 +80,29 @@ def feedback_examples(conn, qversion: str, n: int = 6) -> tuple[list[str], list[
     return (best if len(best) >= n else []), []
 
 
+def parent_best(conn, qversion: str, parents: Sequence[str], n: int = 8) -> dict[str, list[str]]:
+    """Highest-scoring names already coined from each parent, so the model builds on them without repeating."""
+    out: dict[str, list[str]] = {p: [] for p in parents}
+    rows = conn.execute(
+        """
+        SELECT w.word, w.parents FROM words w
+        JOIN scores s ON s.word = w.word AND s.qversion = ?
+        WHERE w.source = 'coined' AND w.parents IS NOT NULL
+        ORDER BY s.composite DESC
+        """,
+        (qversion,),
+    ).fetchall()
+    for r in rows:
+        p = _first_parent(r["parents"])
+        if p in out and len(out[p]) < n:
+            out[p].append(r["word"])
+    return out
+
+
 def build_user_prompt(
     parents: Sequence[str], per_parent: int, min_len: int, max_len: int,
     best: Sequence[str], worst: Sequence[str], rejected: Sequence[str],
+    existing: dict[str, list[str]] | None = None,
 ) -> str:
     lines = [
         f"Parents: {', '.join(parents)}",
@@ -77,6 +111,12 @@ def build_user_prompt(
         "lowercase letters only.",
         f"Real-world style anchors (do not output these): {STYLE_ANCHORS}.",
     ]
+    for p in parents:
+        if existing and existing.get(p):
+            lines.append(
+                f"Strongest names already coined from \"{p}\" (do not repeat them; explore new angles, or "
+                f"improve on what makes these work): {', '.join(existing[p])}."
+            )
     if best:
         lines.append(f"Names our scorer rated highest so far (match their feel, do not copy): {', '.join(best)}.")
     if worst:
@@ -146,6 +186,7 @@ async def _propose(
     per_parent: int, min_len: int, max_len: int,
     best: Sequence[str], worst: Sequence[str], rejected: Sequence[str],
     temperature: float, concurrency: int,
+    existing: dict[str, list[str]] | None = None,
 ) -> list[tuple[str, str]]:
     """Run the proposal requests concurrently. Returns raw (name, parent) pairs."""
     headers = {"Authorization": f"Bearer {key or 'local'}", "Content-Type": "application/json"}
@@ -154,7 +195,7 @@ async def _propose(
 
     async with net.async_client(timeout=120.0) as http:
         async def one(chunk: list[str]) -> None:
-            user = build_user_prompt(chunk, per_parent, min_len, max_len, best, worst, rejected)
+            user = build_user_prompt(chunk, per_parent, min_len, max_len, best, worst, rejected, existing)
             async with sem:
                 parsed = await _ask(http, url, headers, model, system, user, temperature)
             for item in parsed or []:
@@ -173,6 +214,17 @@ async def _propose(
     return out
 
 
+def _weighted_sample(pool: Sequence[str], weights: Sequence[float], k: int) -> list[str]:
+    """k distinct items, drawn without replacement in proportion to their weights."""
+    items, ws = list(pool), list(weights)
+    out: list[str] = []
+    while items and len(out) < k:
+        i = random.choices(range(len(items)), weights=ws, k=1)[0] if sum(ws) > 0 else random.randrange(len(items))
+        out.append(items.pop(i))
+        ws.pop(i)
+    return out
+
+
 def llm_batch(
     ranked_words: Sequence[Any],
     count: int,
@@ -184,6 +236,8 @@ def llm_batch(
     api_key: str | None = None,
     model: str | None = None,
     concurrency: int = 3,
+    focus: Sequence[str] | None = None,
+    bandit=None,
 ) -> list[tuple[str, str]]:
     """Ask the LLM for `count` new, gate-approved names and register them. Returns (name, parent) pairs."""
     if count <= 0 or not ranked_words or budget.exhausted():
@@ -194,26 +248,41 @@ def llm_batch(
     per_parent = config.COIN_LLM_PER_NAME_COUNT
     system = config.load_prompt("coin_prompt.md", DEFAULT_COIN_PROMPT)
 
-    weights = coin.parent_weights(ranked_words, half_life)
+    weights = coin.parent_weights(ranked_words, half_life, bandit)
     words = [r["word"] if hasattr(r, "keys") else str(r) for r in ranked_words]
     # ~40% of raw proposals survive the gate and dedupe; over-ask a little
     n_parents = max(2, math.ceil(count * 1.3 / (per_parent * 0.4)))
-    picked: list[str] = []
-    for w in random.choices(words, weights=weights, k=n_parents * 4):
-        if w not in picked:
-            picked.append(w)
-        if len(picked) >= n_parents:
-            break
     size = max(1, config.COIN_LLM_PARENTS_PER_REQUEST)
-    chunks = [picked[i : i + size] for i in range(0, len(picked), size)]
+    if focus:
+        # a handful of roots must still fill the whole quota: ask repeatedly, each request one chunk
+        # of distinct focus words (repeat requests get different names from the sampling temperature)
+        chunks = []
+        pool = list(focus)
+        per_parent = max(per_parent, config.COIN_LLM_FOCUS_PER_NAME_COUNT)
+        per_chunk = min(size, len(pool))
+        # each request yields per_chunk * per_parent raw names, ~40% of which survive the gate
+        n_requests = max(1, math.ceil(count * 1.3 / (per_chunk * per_parent * 0.4)))
+        pool_w = [bandit.factor(p) for p in pool] if bandit else [1.0] * len(pool)
+        for _ in range(n_requests):
+            chunks.append(_weighted_sample(pool, pool_w, per_chunk))
+    else:
+        picked: list[str] = []
+        for w in random.choices(words, weights=weights, k=n_parents * 4):
+            if w not in picked:
+                picked.append(w)
+            if len(picked) >= n_parents:
+                break
+        chunks = [picked[i : i + size] for i in range(0, len(picked), size)]
 
+    qv = config.QUESTION_VERSION
     with db.session(db_path) as conn:
         known = {r[0] for r in conn.execute("SELECT word FROM words")}
-        best, worst = feedback_examples(conn, config.QUESTION_VERSION, config.COIN_LLM_FEEDBACK)
+        best, worst = feedback_examples(conn, qv, config.COIN_LLM_FEEDBACK, focus=focus)
+        existing = parent_best(conn, qv, sorted({p for c in chunks for p in c})) if focus else None
 
     raw = asyncio.run(_propose(
         chunks, url, key, model, system, per_parent, min_len, max_len,
-        best, worst, list(_RECENT_REJECTS), config.COIN_LLM_TEMPERATURE, concurrency,
+        best, worst, list(_RECENT_REJECTS), config.COIN_LLM_TEMPERATURE, concurrency, existing,
     ))
 
     accepted: dict[str, str] = {}
@@ -229,6 +298,8 @@ def llm_batch(
     pairs = list(accepted.items())
     random.shuffle(pairs)
     pairs = pairs[:count]
+    if focus:
+        print(f"[llm-coin] {len(chunks)} requests, {len(raw)} raw names, {len(accepted)} passed gate+dedupe")
     if not pairs:
         return []
 

@@ -116,6 +116,9 @@ namefinder coin --continuous --half-life 40.0 --backend local
 # Coin from specific base words:
 namefinder coin --bases spectral,fathom,lattice --limit 20
 
+# Continuous loop focused on chosen roots (blends may still pair them with any other word):
+namefinder coin --continuous --bases root
+
 # Fast dry-run without RDAP checks or LLM scoring:
 namefinder coin --no-domains --no-score --limit 50
 ```
@@ -133,6 +136,22 @@ Each candidate comes from one of five engines (prefix, suffix, truncation, portm
 **LLM coining (`engine='llm'`).** A sixth engine asks a model to invent names from your top base words. `--llm-share` (default 0.3, `0` disables) sets the fraction of each batch it supplies; `--coin-model` / `OPENROUTER_COIN_MODEL` picks its model (default: the scoring model). The model only proposes: every name goes through the same quality gate, de-duplication, scoring, domain check and engine learning as the rule engines, and is stored with its parent word. Two feedback loops run automatically: the prompt shows the model your best and worst earlier LLM names plus the names the filters recently rejected, and once 15+ rated LLM names exist its share is scaled between 0.5x and 2x by how they score against the rule engines (printed as `[learn] llm share`). Override the system prompt with `prompts/coin_prompt.md` (gitignored). A failed LLM request never stops the loop. It runs under the same `--max-cost`. One-shot `coin --limit N` uses it too; `--bases` runs stay rule-only.
 
 Each coined word records its engine and parents. Between cycles the loop re-weights engines and portmanteau partner roots by the scores their earlier words earned (shrunk toward the overall mean, with 30% kept uniform so no engine starves), and prints the engine weights each cycle.
+
+**Focus mode (`coin --continuous --bases a,b`).** Every name is built on the given roots; portmanteaus still blend them with any scored word or concept root. The LLM engine sees each root's strongest existing names (to build on, not repeat), takes its best/worst feedback from names on those roots, and fills any gap the rule engines leave once a root's simple variations run out.
+
+### Base Value and the Base Bandit (`namefinder bases`)
+
+Some bases produce far better names than others. A base's value is its **tail rate**: the share of its scored coined names that reach the global top 5% of coined composites, shrunk toward a 5% prior worth 20 names, `(hits + 1) / (names + 20)`. A raw maximum would favour bases that have simply been tried most, and a mean rewards consistent mediocrity; the tail rate measures how often a base produces a winner, per attempt. A base is the first entry of `words.parents`, so blends credit their base, not their partner.
+
+```powershell
+namefinder bases                          # top 30 bases by tail rate
+namefinder bases --sort recent -n 50      # by rate over each base's last 150 names
+namefinder bases --sort best --min-names 50
+```
+
+The `recent` column is red when a base's last 150 names hit well below its all-time rate (it is running dry) and green when it is improving.
+
+Each coin cycle draws a hit rate for every base from `Beta(1 + hits, 19 + misses)` over its recent window (Thompson sampling) and multiplies that base's sampling weight by the draw relative to the 5% prior, printed as `[learn] bases favoured`. Proven bases are picked more, exhausted ones fade, and untried bases still get explored. The dictionary rank prior fades as a base gathers evidence (half its influence after 50 names), so a strong base deep in the ranking can still be chosen often. In focus mode with several roots, the bandit splits picks between them. Tune or disable it with `BASE_*` in `config.py` (`BASE_BANDIT = False` restores rank-only sampling).
 
 ## View Rankings and Status in CLI
 
@@ -186,7 +205,8 @@ namefinder rank-final --refresh
 | `--continuous`, `-c` | `coin` | Run autonomous generation, RDAP check, and scoring loop |
 | `--half-life FLOAT` | `coin` | Rank falloff half-life for base word sampling (default: `25.0`) |
 | `--top-bases N` | `coin` | Number of base words to sample across vocabulary (default: `25`) |
-| `--bases WORD1,WORD2` | `coin` | Explicit root words to coin from |
+| `--bases WORD1,WORD2` | `coin` | Explicit root words to coin from; with `--continuous`, focus the loop on them |
+| `--sort KEY` / `--min-names N` | `bases` | Sort by `rate` (default), `recent`, `best`, `names` or `hits`; hide bases with fewer names |
 | `--min-len N` / `--max-len N` | `coin` | Character length constraints for coined words (default: 5–10) |
 | `--no-domains` | `coin` | Skip automatic RDAP domain checks |
 | `--no-score` | `coin` | Skip automatic LLM brand scoring |
@@ -197,7 +217,7 @@ namefinder rank-final --refresh
 | `--bases-only` | `top` | Hide coined names; show dictionary base words only |
 | `--since AGE` | `top` | Mark names scored within the window with a yellow `NEW` and names refined within it with a cyan `REF` (e.g. `90m`, `6h`, `2d`; default `24h`; `0` turns marks off). Names refined before this feature existed carry no timestamp, so they are never marked `REF` |
 | `--new` | `top` | Show only names marked `NEW` or `REF`; combine with `-n` and the other filters |
-| `--batch N` / `--domain-top F` / `--concurrency N` | `coin` | Continuous mode: coined words per cycle (default 40), fraction of each cycle's best scores that get a domain check (default 0.25; `1.0` = all), parallel scoring requests (default 4) |
+| `--batch N` / `--domain-top F` / `--concurrency N` | `coin` | Continuous mode: coined words per cycle (default 120), fraction of each cycle's best scores that get a domain check (default 0.25; `1.0` = all), parallel scoring and LLM-coining requests (default 20; rate limits back off automatically) |
 | `--max-cost USD` | `score`, `coin`, `refine` | Stop sending paid requests once this much is spent in the command (default `$1.00`, env `NAMEFINDER_MAX_COST`; `0` = no limit). In-flight requests finish, so spend can overshoot slightly; progress is saved and a rerun continues |
 | `--top-n N` / `--samples N` | `refine` | How many top coined words to review, and independent reviews per word (defaults: 100 / 3) |
 | `--model MODEL` | `score`, `rank-final` | Override the model ID |

@@ -222,9 +222,19 @@ COIN_MODEL = os.getenv("OPENROUTER_COIN_MODEL") or SCORE_MODEL
 COIN_LLM_SHARE = 0.30          # fraction of each continuous cycle that comes from the LLM engine (0 = off)
 COIN_LLM_PER_NAME_COUNT = 8    # names requested per parent word
 COIN_LLM_PARENTS_PER_REQUEST = 6
+COIN_LLM_FOCUS_PER_NAME_COUNT = 16  # names requested per parent when the loop is focused on a few roots
 COIN_LLM_TEMPERATURE = 0.9
 COIN_LLM_FEEDBACK = 6          # best/worst earlier LLM names shown to the model as style feedback
-COIN_BATCH = 40              # coined words per continuous cycle
+COIN_BATCH = 120             # coined words per continuous cycle
+
+# Base-word bandit (namefinder/bases.py): which bases tend to produce top-tier names
+BASE_BANDIT = True           # weight base sampling by each base's track record (False = rank prior only)
+BASE_TAIL_QUANTILE = 0.95    # a "hit" is a coined name in the top 5% of all coined composites
+BASE_PRIOR = (1, 19)         # Beta prior pseudo-counts (hits, misses): prior hit rate 5%, worth 20 names
+BASE_WINDOW = 150            # bandit judges each base on its most recent N names, so exhausted bases fade
+BASE_MULT_CAP = 20.0         # largest weight multiplier a single base can draw
+BASE_RANK_FADE = 50          # names after which the rank prior keeps half its (log) influence on a base
+COIN_CONCURRENCY = 20        # parallel scoring / LLM-coining requests per cycle (429s back off automatically)
 COIN_DOMAIN_TOP = 0.25       # fraction of each cycle (best scores) that gets a domain check
 DOMAIN_STALE_DAYS = 7
 

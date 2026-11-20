@@ -363,6 +363,31 @@ def print_score_grid(
         _console.print(line)
 
 
+def print_base_table(stats: Sequence[Any], threshold: float, title: str = "") -> None:
+    """Base-word value table: rows are bases.BaseStat, already sorted and trimmed."""
+    table = Table(title=title or None, box=box.SIMPLE_HEAVY, title_style="bold cyan", header_style="bold")
+    table.add_column("#", justify="right", style="dim")
+    table.add_column("base", style="bold white")
+    table.add_column("names", justify="right")
+    table.add_column(f"hits ≥{threshold:.3f}", justify="right")
+    table.add_column("tail rate", justify="right")
+    table.add_column("recent", justify="right")
+    table.add_column("best", justify="right")
+    table.add_column("best name", style="white")
+    for i, s in enumerate(stats, 1):
+        rate = s.rate
+        rate_style = "bold green" if rate >= 0.15 else "cyan" if rate >= 0.08 else "dim"
+        # recent well below all-time = the base is running dry
+        trend = "red" if s.recent_rate < 0.6 * rate else "green" if s.recent_rate > 1.3 * rate else "white"
+        table.add_row(
+            str(i), s.word, str(s.n), str(s.hits),
+            Text(f"{rate:.3f}", style=rate_style),
+            Text(f"{s.recent_rate:.3f}", style=trend),
+            f"{s.best:.3f}", s.best_word,
+        )
+    _console.print(table)
+
+
 class CostColumn(ProgressColumn):
     """Live spend / limit and token counts, re-rendered on every refresh."""
 
