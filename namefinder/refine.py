@@ -15,6 +15,7 @@ import json
 import statistics
 import sys
 from collections import Counter
+from datetime import datetime, timezone
 from typing import Any
 
 from tqdm import tqdm
@@ -185,6 +186,7 @@ def build_row(conn, old: dict[str, Any], m: dict[str, Any], model: str = "") -> 
         "ambiguity": ambiguity,
         "phonetic": phonetic,
         "refined": 1,
+        "refined_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
 
 

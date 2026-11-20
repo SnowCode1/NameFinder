@@ -26,6 +26,19 @@ from rich.table import Table
 from rich.text import Text
 
 
+def _force_utf8_streams() -> None:
+    """Windows consoles and pipes default to cp1252, which cannot encode glyphs such as the refined check mark."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            if (getattr(stream, "encoding", "") or "").lower().replace("-", "") != "utf8":
+                stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
+
+_force_utf8_streams()
+
+
 def get_terminal_width() -> int:
     cols = shutil.get_terminal_size(fallback=(120, 30)).columns
     return max(cols, 110)
@@ -212,6 +225,11 @@ def build_rich_table(
         cand_cell = f"[bold white]{word}[/]"
         if r.get("refined"):
             cand_cell += " [bold green]✓[/]"
+        fresh = r.get("fresh")
+        if fresh == "new":
+            cand_cell += " [bold black on yellow] NEW [/]"
+        elif fresh == "refined":
+            cand_cell += " [bold black on cyan] REF [/]"
         if sound and sound != word:
             cand_cell += f"\n[dim]{sound}[/]"
         row_cells = [

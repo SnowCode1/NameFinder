@@ -134,6 +134,7 @@ SCORE_EXTRA_COLUMNS = (
     ("phonetic", "REAL"),       # 0..1 blended pronounceability
     ("refined", "INTEGER DEFAULT 0"),  # 1 once the refine pass has run
     ("verbable", "REAL"),       # 0..1 works as a verb: "I just ___ it and found what I needed"
+    ("refined_at", "TEXT"),     # UTC ISO timestamp of the latest refine pass (for `top` freshness marks)
 )
 
 
@@ -246,15 +247,16 @@ def upsert_score(conn: sqlite3.Connection, row: dict[str, Any]) -> None:
         INSERT OR REPLACE INTO scores
             (word, qversion, model, fit, natural, spellable, memorable, neg,
              taken, common, composite, why, why_not, raw, scored_at,
-             syllables, say_aloud, misheard_as, ambiguity, phonetic, refined, verbable)
+             syllables, say_aloud, misheard_as, ambiguity, phonetic, refined, verbable, refined_at)
         VALUES (:word, :qversion, :model, :fit, :natural, :spellable, :memorable,
                 :neg, :taken, :common, :composite, :why, :why_not, :raw, :scored_at,
-                :syllables, :say_aloud, :misheard_as, :ambiguity, :phonetic, :refined, :verbable)
+                :syllables, :say_aloud, :misheard_as, :ambiguity, :phonetic, :refined, :verbable,
+                :refined_at)
         """,
         {
             "why": None, "why_not": None, "syllables": None, "say_aloud": None,
             "misheard_as": None, "ambiguity": None, "phonetic": None, "refined": 0,
-            "verbable": None,
+            "verbable": None, "refined_at": None,
             **row,
         },
     )
@@ -554,6 +556,8 @@ def get_candidates_summary(
             "phonetic": r["phonetic"] if "phonetic" in r.keys() else None,
             "refined": bool(r["refined"]) if "refined" in r.keys() else False,
             "verbable": r["verbable"] if "verbable" in r.keys() else None,
+            "scored_at": r["scored_at"] if "scored_at" in r.keys() else None,
+            "refined_at": r["refined_at"] if "refined_at" in r.keys() else None,
         })
         if len(out) >= limit:
             break
