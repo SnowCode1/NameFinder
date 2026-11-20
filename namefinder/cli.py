@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import re
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from . import budget, config, console, db
@@ -162,6 +164,11 @@ Scoring Examples:
                        help="show only candidates clear of trademark conflicts")
     p_top.add_argument("--bases-only", action="store_true",
                        help="show only dictionary base words (exclude coined names)")
+    p_top.add_argument("--since", default="24h", metavar="AGE",
+                       help="mark names scored (NEW) or refined (REF) within this window, e.g. 90m, 6h, 2d "
+                            "(default: 24h; 0 turns marking off)")
+    p_top.add_argument("--new", dest="new_only", action="store_true",
+                       help="show only names marked NEW or REF within the --since window")
 
     p_coin = sub.add_parser(
         "coin",
@@ -223,17 +230,50 @@ Coining Examples:
     return ap
 
 
+def _parse_age(text: str) -> timedelta | None:
+    """'90m' / '6h' / '2d' -> timedelta; '0' or empty -> None (marking off)."""
+    m = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*([mhd]?)\s*", str(text or "0"))
+    if not m:
+        raise SystemExit(f"--since: expected a number with m, h or d (e.g. 90m, 6h, 2d), got {text!r}")
+    value, unit = float(m.group(1)), m.group(2) or "h"
+    if value == 0:
+        return None
+    return timedelta(**{{"m": "minutes", "h": "hours", "d": "days"}[unit]: value})
+
+
+def _mark_fresh(items: list[dict], window: timedelta | None) -> None:
+    """Set item['fresh'] to 'new' (scored in window), 'refined' (refined in window) or None."""
+    cutoff = (datetime.now(timezone.utc) - window).isoformat(timespec="seconds") if window else None
+    for it in items:
+        it["fresh"] = None
+        if not cutoff:
+            continue
+        if (it.get("scored_at") or "") >= cutoff:
+            it["fresh"] = "new"
+        elif (it.get("refined_at") or "") >= cutoff:
+            it["fresh"] = "refined"
+
+
 def cmd_top(db_path, limit: int = 25, only_free: bool = False, only_clean: bool = False,
-            bases_only: bool = False, all_free: bool = False) -> None:
+            bases_only: bool = False, all_free: bool = False,
+            since: str = "24h", new_only: bool = False) -> None:
+    window = _parse_age(since)
+    if new_only and not window:
+        raise SystemExit("--new needs a non-zero --since window")
     with db.session(db_path) as conn:
         qversion = config.QUESTION_VERSION
         items = db.get_candidates_summary(
-            conn, qversion, limit=limit,
+            conn, qversion, limit=10**9 if new_only else limit,
             only_free_domains=only_free,
             only_clean_trademarks=only_clean,
             bases_only=bases_only,
             all_domains_free=all_free,
         )
+        _mark_fresh(items, window)
+        n_new = sum(1 for it in items[:limit] if it["fresh"] == "new")
+        n_ref = sum(1 for it in items[:limit] if it["fresh"] == "refined")
+        if new_only:
+            items = [it for it in items if it["fresh"]][:limit]
 
         filter_desc = []
         if bases_only:
@@ -246,7 +286,10 @@ def cmd_top(db_path, limit: int = 25, only_free: bool = False, only_clean: bool 
             filter_desc.append("clean trademarks only")
         filters_str = f" ({', '.join(filter_desc)})" if filter_desc else ""
 
-        title = f"NameFinder Rankings: Top {len(items)}{filters_str}  (✓ = refined)"
+        legend = "✓ = refined"
+        if window:
+            legend += f", NEW/REF = scored/refined in last {since}: {n_new} new, {n_ref} refined"
+        title = f"NameFinder Rankings: Top {len(items)}{filters_str}  ({legend})"
         if not items:
             print(f"\n{console.yellow('No candidates match the specified criteria.')}")
             print(f"Run {console.b_cyan('namefinder score')} or {console.b_cyan('namefinder coin')} first.\n")
@@ -343,7 +386,8 @@ def main(argv: list[str] | None = None) -> int:
                        concurrency=args.concurrency)
         elif args.cmd == "top":
             cmd_top(args.db, limit=args.top_count, only_free=args.free_domains, only_clean=args.clean,
-                    bases_only=args.bases_only, all_free=args.all_free)
+                    bases_only=args.bases_only, all_free=args.all_free,
+                    since=args.since, new_only=args.new_only)
         elif args.cmd == "coin":
             from . import coin
             bases_list = [b.strip() for b in args.bases.split(",")] if args.bases else None

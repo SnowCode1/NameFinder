@@ -195,6 +195,8 @@ namefinder rank-final --refresh
 | `--all-free` | `top` | Only candidates whose every checked domain is free (words with no domain check are excluded) |
 | `--clean` | `top` | Filter display to candidates clear of trademark conflicts |
 | `--bases-only` | `top` | Hide coined names; show dictionary base words only |
+| `--since AGE` | `top` | Mark names scored within the window with a yellow `NEW` and names refined within it with a cyan `REF` (e.g. `90m`, `6h`, `2d`; default `24h`; `0` turns marks off). Names refined before this feature existed carry no timestamp, so they are never marked `REF` |
+| `--new` | `top` | Show only names marked `NEW` or `REF`; combine with `-n` and the other filters |
 | `--batch N` / `--domain-top F` / `--concurrency N` | `coin` | Continuous mode: coined words per cycle (default 40), fraction of each cycle's best scores that get a domain check (default 0.25; `1.0` = all), parallel scoring requests (default 4) |
 | `--max-cost USD` | `score`, `coin`, `refine` | Stop sending paid requests once this much is spent in the command (default `$1.00`, env `NAMEFINDER_MAX_COST`; `0` = no limit). In-flight requests finish, so spend can overshoot slightly; progress is saved and a rerun continues |
 | `--top-n N` / `--samples N` | `refine` | How many top coined words to review, and independent reviews per word (defaults: 100 / 3) |
