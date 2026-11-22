@@ -26,32 +26,35 @@ def _add_common(p: argparse.ArgumentParser) -> None:
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         prog="namefinder",
-        description="Resumable brand discovery, domain screening, trademark clearance, and neologism pipeline.",
+        description="Brand-name discovery: generate candidates, rank them against each other with an LLM judge, "
+                    "then screen domains and trademarks.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Standard Workflows:
+Recommended workflow (idea-first generation + tournament ranking):
 
-  1. Score Dictionary Base Words:
-     namefinder prepare                         # stage 1: ingest & filter English dictionary (~11k words)
-     namefinder score --backend local --limit 100 # score top roots locally (LM Studio on port 1234)
-     namefinder score --backend openrouter      # or score via OpenRouter cloud
+  1. Ideas: true statements about the product, each with candidate roots
+     namefinder ideas generate --per-angle 10      # propose ideas per angle (merges duplicates)
+     namefinder ideas review                       # approve / reject / edit, one at a time
+     namefinder ideas list --status approved       # or: ideas mark --approve 3 7 --reject 4
 
-  2. Continuous Neologism Coining & Discovery:
-     namefinder coin -c --backend local         # autonomous stream: rank-weighted sampling -> coin -> RDAP -> score
-     namefinder coin --limit 30 --backend local # single batch of 30 independently sampled variations
-     namefinder coin --bases fathom,spectral    # coin variations from specific root words
+  2. Names from the approved ideas (.com is checked automatically)
+     namefinder generate --per-idea 30
 
-  3. Screen Domains & Trademarks Directly:
-     namefinder check-domains --top-n 500       # check .com, .io, .dev via keyless RDAP
-     namefinder check-trademarks --top-n 100    # check USPTO (Markbase), PyPI, GitHub
+  3. Rank by tournament (Plackett-Luce ratings; prunes below the top 100 by default)
+     namefinder tournament --source ideas --carry 100 --rounds 8 --concurrency 16
+     namefinder tournament --source rated --pool 150 --rounds 6     # more games for the leaders
+     namefinder tournament --show-only --show 40                    # ranking + rating by source
 
-  4. Inspect Rankings & Export:
-     namefinder top --free-domains              # view top brands with verified available domains
-     namefinder top --clean                     # view top brands clear of trademark conflicts
-     namefinder bases                           # which base words produce top-tier coined names
-     namefinder rank-final --skip-llm           # export shortlist.md / shortlist.csv to results/
-     namefinder status                          # view pipeline cache & database status
-     namefinder score --clear                   # wipe cached scores to start fresh
+  4. Inspect and screen the leaders
+     namefinder top --by tournament --free-domains -n 30
+     namefinder check-trademarks --tournament 25 --no-ipgod         # USPTO, PyPI, GitHub
+
+Bulk candidates (older pipeline, still a good source for the tournament):
+     namefinder coin -c                            # continuous coining from base words
+     namefinder tournament --source both --pool 2000 --rounds 8     # rank untouched bulk names too
+     namefinder status                             # pipeline counts
+
+Every paid command takes --max-cost (default $1.00). See USAGE.md for details.
 """,
     )
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -115,7 +118,19 @@ Scoring Examples:
     p3.add_argument("--top-n", type=int, default=config.SCORE_TOP_N)
     p3.add_argument("--refresh", action="store_true", help="ignore cached RDAP answers")
 
-    p4 = sub.add_parser("check-trademarks", help="stage 4: USPTO clearance + repo collision screening")
+    p4 = sub.add_parser(
+        "check-trademarks", help="stage 4: USPTO clearance + repo collision screening",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  namefinder check-trademarks --tournament 25 --no-ipgod   # the top 25 by tournament rating
+  namefinder check-trademarks --word origset --word fotogram
+  namefinder check-trademarks --top-n 100                  # older pipeline: survivors by old score
+
+USPTO goes through Markbase (no key needed, about 25 names a minute); IP Australia needs the IPGOD
+CSVs in data/ipgod/. This is a screen, not legal clearance.
+""",
+    )
     _add_common(p4)
     p4.add_argument("--top-n", type=int, default=None, help="max candidates to check")
     p4.add_argument("--refresh", action="store_true")
@@ -159,7 +174,22 @@ Scoring Examples:
 
     p_tour = sub.add_parser(
         "tournament",
-        help="rank the best names against each other in groups of 5 (Elo), instead of scoring each alone",
+        help="rank names against each other in judged groups (Plackett-Luce ratings), instead of scoring each alone",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  namefinder tournament --source ideas --carry 100 --rounds 8 --concurrency 16
+      idea/variant names with a free .com, plus the best 100 rated names as competition
+  namefinder tournament --source rated --pool 150 --rounds 6
+      more games for the current top 150 (and any unrated idea/variant names)
+  namefinder tournament --source both --pool 2000 --rounds 8
+      everything rated + idea names + 2000 untouched old-pool names, tagged for comparison
+  namefinder tournament --show-only --show 40        # print the stored ranking (no API calls)
+  namefinder tournament --refit                      # refit ratings from the stored matches
+
+Names stop playing once they are clearly below the 100th best (--prune-rank, --z, --min-games;
+--no-prune turns it off). Reference names from prompts/tournament_refs.txt always play.
+""",
     )
     _add_common(p_tour)
     p_tour.add_argument("--pool", type=int, default=300,
@@ -206,7 +236,20 @@ Scoring Examples:
     p_tour.add_argument("--carry", type=int, default=60,
                         help="with --source ideas: how many of the best-rated names to carry in (default: %(default)s)")
 
-    p_ideas = sub.add_parser("ideas", help="idea-first naming, step 1: generate ideas, review them, list them")
+    p_ideas = sub.add_parser(
+        "ideas", help="idea-first naming, step 1: generate ideas, review them, list them",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  namefinder ideas generate --per-angle 10                       # glm (cheap)
+  namefinder ideas generate --model anthropic/claude-sonnet-5.5  # sharper ideas, about 12 cents
+  namefinder ideas generate --angle discovery --angle gaps
+  namefinder ideas review                                        # a/r/e/s/q, one idea at a time
+  namefinder ideas list --status pending
+  namefinder ideas mark --approve 3 7 12 --reject 4 9
+  namefinder ideas merge                                         # fold duplicate ideas together
+""",
+    )
     ideas_sub = p_ideas.add_subparsers(dest="ideas_cmd", required=True)
     pi_gen = ideas_sub.add_parser("generate", help="have the model propose ideas (true statements + roots) per angle")
     _add_common(pi_gen)
@@ -238,7 +281,18 @@ Scoring Examples:
     pi_mark.add_argument("--approve", type=int, nargs="*", default=[], metavar="ID")
     pi_mark.add_argument("--reject", type=int, nargs="*", default=[], metavar="ID")
 
-    p_gen = sub.add_parser("generate", help="idea-first naming, step 2: invent names from approved ideas")
+    p_gen = sub.add_parser(
+        "generate", help="idea-first naming, step 2: invent names from approved ideas",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  namefinder generate --per-idea 30                  # every approved idea
+  namefinder generate --idea 12 --idea 40            # just these ideas
+  namefinder generate --all-tlds                     # also check .io and .dev (much slower)
+
+Then: namefinder tournament --source ideas --carry 100 --rounds 8
+""",
+    )
     _add_common(p_gen)
     p_gen.add_argument("--per-idea", type=int, default=20, help="names requested per idea (default: %(default)s)")
     p_gen.add_argument("--no-feedback", action="store_true",
@@ -258,6 +312,15 @@ Scoring Examples:
     p_evo = sub.add_parser(
         "evolve",
         help="idea-first naming, step 3: improve the best-rated names using the tournament judge's critique",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  namefinder evolve --top 30 --variants 6
+  namefinder evolve --top 30 --no-refs              # leave your reference names alone
+
+Then: namefinder tournament --source rated --pool 150 --rounds 6
+Variants beat random bulk names but rarely their own parents.
+""",
     )
     _add_common(p_evo)
     p_evo.add_argument("--top", type=int, default=20, help="how many of the best-rated names to improve (default: %(default)s)")
@@ -274,7 +337,16 @@ Scoring Examples:
                        help="check every configured domain, not just .com (much slower: .dev is rate-limited)")
     p_evo.add_argument("--max-cost", type=float, default=None, help=_MAX_COST_HELP)
 
-    p_top = sub.add_parser("top", help="inspect candidate rankings directly in the terminal")
+    p_top = sub.add_parser(
+        "top", help="inspect candidate rankings directly in the terminal",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  namefinder top --by tournament --free-domains -n 30   # ranked by tournament rating
+  namefinder top --by tournament --clean                # ... and clear of trademark conflicts
+  namefinder top --free-domains                         # ranked by the old composite score
+""",
+    )
     _add_common(p_top)
     p_top.add_argument("--top", "-n", dest="top_count", type=int, default=25,
                        help="how many candidates to show (default: 25)")
