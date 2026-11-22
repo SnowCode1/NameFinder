@@ -166,6 +166,9 @@ GENERIC_PREFIX_PENALTY = {   # prefix -> composite multiplier reduction
 SYLLABLE_PENALTY = {3: 0.04, 4: 0.10}
 # Refine pass (second pass over the top coined words)
 REFINE_MODEL = os.getenv("OPENROUTER_REFINE_MODEL") or SCORE_MODEL
+TOURNAMENT_MODEL = os.getenv("OPENROUTER_TOURNAMENT_MODEL") or SCORE_MODEL   # judge for `tournament`; ratings are kept per model
+IDEAS_MODEL = os.getenv("OPENROUTER_IDEAS_MODEL") or SCORE_MODEL            # idea generation (`ideas generate`)
+NAMEGEN_MODEL = os.getenv("OPENROUTER_NAMEGEN_MODEL") or SCORE_MODEL        # names from ideas and variants (`generate`, `evolve`)
 TOP_SINCE = "10m"       # `top --since` default: window for NEW/REF marks
 REFINE_TOP_N = 100
 RESCORE_TOP_N = 10000   # `rescore`: top coined names brought up to the current brand prompt
@@ -176,6 +179,12 @@ REFINE_SAMPLES = 3
 TLDS = ("io", "dev")        # checked as <word>.<tld>
 USE_PREFIX = ""             # set to "use" to also check use<word>.com
 CHECK_PLAIN_COM = True      # <word>.com
+
+
+# Domains `generate` and `evolve` check for new names. .com only by default: it is what the tournament
+# pool needs, and it is the fast registry (.dev goes through Google's, capped at 2 requests/s).
+# `--all-tlds` on those commands checks every active role instead.
+GENERATION_DOMAIN_ROLES = ("com",)
 
 
 def active_domain_roles() -> tuple[str, ...]:
@@ -271,6 +280,10 @@ OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL") or DEFAULT_MODEL
 # (comma-separated names, no fallbacks).
 OPENROUTER_PROVIDER = os.getenv("OPENROUTER_PROVIDER", "").strip()
 OPENROUTER_REASONING = os.getenv("OPENROUTER_REASONING", "low").strip().lower()
+# Without a pinned provider, route each request to the cheapest provider that serves the model
+# (OpenRouter `provider.sort`). Measured on the tournament judge: about 3x cheaper per call with
+# no measurable loss in consistency. Set OPENROUTER_SORT=off for OpenRouter's default balancing.
+OPENROUTER_SORT = os.getenv("OPENROUTER_SORT", "price").strip().lower()
 
 
 def openrouter_extras(url: str) -> dict:
@@ -285,6 +298,8 @@ def openrouter_extras(url: str) -> dict:
     if OPENROUTER_PROVIDER:
         names = [n.strip() for n in OPENROUTER_PROVIDER.split(",") if n.strip()]
         extras["provider"] = {"order": names, "allow_fallbacks": False}
+    elif OPENROUTER_SORT and OPENROUTER_SORT not in ("off", "none", "default"):
+        extras["provider"] = {"sort": OPENROUTER_SORT}
     return extras
 
 

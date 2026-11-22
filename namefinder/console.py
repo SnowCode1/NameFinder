@@ -187,6 +187,7 @@ def build_rich_table(
 ) -> Table:
     """Construct an auto-expanding rich Table that fills the full terminal width."""
     items = list(rows)[:limit]
+    show_elo = any(dict(i).get("elo") is not None for i in items)
     t = Table(
         title=f"[bold cyan]{title}[/]",
         box=box.ROUNDED,
@@ -202,6 +203,8 @@ def build_rich_table(
     t.add_column("Fit", justify="center", no_wrap=True, min_width=5)
     t.add_column("Nat", justify="center", no_wrap=True, min_width=5)
     t.add_column("Verb", justify="center", no_wrap=True, min_width=5)
+    if show_elo:
+        t.add_column("Elo", justify="center", no_wrap=True, min_width=9)
 
     if show_domains:
         t.add_column("Domains", no_wrap=True, min_width=25)
@@ -240,6 +243,11 @@ def build_rich_table(
             nat_text,
             verb_text,
         ]
+        if show_elo:
+            elo = r.get("elo")
+            row_cells.append(
+                f"[bold cyan]{elo:.0f}[/] [dim]#{r['elo_rank']}[/]" if elo is not None else "[dim]-[/]"
+            )
 
         if show_domains:
             dom_text = format_domain_summary(r.get("domains") or r.get("domain_state"))
@@ -513,3 +521,210 @@ class LiveScoringDashboard:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         return self.live.__exit__(exc_type, exc_val, exc_tb)
+
+
+# --- tournament ------------------------------------------------------------
+def log(text: str, markup: bool = False) -> None:
+    """Print a line through the shared console, so it lands above any live bar or dashboard."""
+    _console.print(text, markup=markup, highlight=False)
+
+
+def _rating_bar(value: float, lo: float, hi: float, width: int = 8, style: str = "cyan") -> Text:
+    span = max(hi - lo, 1e-9)
+    filled = max(0, min(width, round((value - lo) / span * width)))
+    return Text("█" * filled, style=style) + Text("░" * (width - filled), style="grey30")
+
+
+def _move_cell(move: int | None) -> str:
+    if move is None:
+        return "[dim]new[/]"
+    if move > 0:
+        return f"[bold green]▲{move}[/]"
+    if move < 0:
+        return f"[bold red]▼{-move}[/]"
+    return "[dim]·[/]"
+
+
+def _delta_cell(delta: float | None) -> str:
+    if delta is None or abs(delta) < 0.5:
+        return "[dim]·[/]"
+    return f"[green]+{delta:.0f}[/]" if delta > 0 else f"[red]{delta:.0f}[/]"
+
+
+def build_tournament_table(
+    rows: Sequence[dict[str, Any]],
+    title: str = "Tournament ranking",
+    limit: int = 30,
+    bench: str | None = None,
+    bench_rating: float | None = None,
+    tld: str = "com",
+    caption: str | None = None,
+) -> Table:
+    """Rating table. Each row: word, rating, games, rank, move, delta, domain, old, note, is_ref."""
+    items = list(rows)[:limit]
+    t = Table(
+        title=f"[bold cyan]{title}[/]",
+        caption=caption,
+        box=box.ROUNDED,
+        expand=True,
+        header_style="bold cyan",
+        border_style="dim",
+        caption_style="dim",
+    )
+    t.add_column("#", justify="right", style="bold cyan", no_wrap=True, min_width=3)
+    t.add_column("Name", no_wrap=True, min_width=14)
+    show_origin = any(r.get("origin") not in (None, "old") for r in items)
+    if show_origin:
+        t.add_column("Src", no_wrap=True, min_width=5)
+    t.add_column("Rating", no_wrap=True, min_width=14)
+    show_moves = any(r.get("move") is not None or r.get("delta") is not None for r in items)
+    if show_moves:
+        t.add_column("Move", justify="center", no_wrap=True, min_width=4)
+        t.add_column("Δ rnd", justify="right", no_wrap=True, min_width=5)
+    if bench and bench_rating is not None:
+        t.add_column(f"vs {bench}", justify="right", no_wrap=True, min_width=8)
+    t.add_column("Games", justify="right", no_wrap=True, min_width=5)
+    t.add_column(f".{tld}", no_wrap=True, min_width=5)
+    t.add_column("Old", justify="center", no_wrap=True, min_width=5)
+    t.add_column("Biggest flaw (judge)", style="italic", ratio=1, min_width=20)
+
+    # Fixed floor/ceiling around the 1500 start so a small spread does not look dramatic.
+    ratings = [r["rating"] for r in items] or [1500.0]
+    lo, hi = min(ratings + [1400.0]), max(ratings + [1600.0])
+    for r in items:
+        word = r["word"]
+        name = f"[bold magenta]{word}[/] [dim magenta]ref[/]" if r.get("is_ref") else f"[bold white]{word}[/]"
+        rating = Text(f"{r['rating']:>5.0f} ", style="bold white") + _rating_bar(
+            r["rating"], lo, hi, style="magenta" if r.get("is_ref") else "cyan")
+        cells = [str(r["rank"]), name]
+        if show_origin:
+            style = {"idea": "green", "variant": "yellow", "both": "cyan", "ref": "magenta",
+                     "elite": "blue", "idea2": "bold green"}.get(r.get("origin"), "dim")
+            cells.append(f"[{style}]{r.get('origin') or 'old'}[/]")
+        cells.append(rating)
+        if show_moves:
+            cells += [_move_cell(r.get("move")), _delta_cell(r.get("delta"))]
+        if bench and bench_rating is not None:
+            if word == bench:
+                cells.append("[dim]benchmark[/]")
+            else:
+                d = r["rating"] - bench_rating
+                cells.append(f"[bold green]+{d:.0f}[/]" if d > 0 else f"[red]{d:.0f}[/]")
+        dom = r.get("domain")
+        dom_cell = "[bold green]FREE[/]" if dom == "available" else ("[dim]taken[/]" if dom else "[dim]?[/]")
+        old = r.get("old")
+        cells += [str(r["games"]), dom_cell, badge_score(old) if old is not None else "[dim]-[/]",
+                  r.get("note") or "[dim]-[/]"]
+        t.add_row(*cells)
+    return t
+
+
+class TournamentDashboard:
+    """Live view for `tournament`: header, round progress with spend, and the rating table.
+
+    Quacks like the progress bar `play_round` expects (`update`, `set_postfix_str`), so the
+    judge loop does not know it is drawing a dashboard.
+    """
+
+    def __init__(self, header: Text, total_rounds: int, table_rows: int = 15):
+        from rich.panel import Panel
+        self._Panel = Panel
+        self.header = header
+        self.total_rounds = total_rounds
+        self.table_rows = max(6, table_rows)
+        self.facts: dict[str, str] = {}
+        self.table: Table | None = None
+        self.progress = Progress(
+            SpinnerColumn(style="bold cyan"),
+            TextColumn("[bold cyan]{task.description}"),
+            BarColumn(bar_width=None, complete_style="cyan", finished_style="bold cyan"),
+            MofNCompleteColumn(),
+            TextColumn("[dim]calls[/]"),
+            TimeRemainingColumn(),
+            CostColumn(),
+            expand=True,
+        )
+        self.task_id = self.progress.add_task("Round", total=1)
+        self.live = Live(self._view(), console=_console, refresh_per_second=6, transient=False)
+
+    def _view(self) -> Group:
+        facts = Text()
+        for i, (k, v) in enumerate(self.facts.items()):
+            facts.append(("   " if i else "") + f"{k} ", style="dim")
+            facts.append(v, style="bold white")
+        parts: list[Any] = [self._Panel(Group(self.header, facts) if self.facts else self.header,
+                                        border_style="cyan", title="[bold cyan]Tournament[/]"),
+                            self.progress]
+        if self.table is not None:
+            parts.append(self.table)
+        return Group(*parts)
+
+    def refresh(self) -> None:
+        self.live.update(self._view())
+
+    def begin_round(self, round_no: int, index: int, calls: int) -> None:
+        self.progress.reset(self.task_id, total=calls, completed=0,
+                            description=f"Round {round_no} ({index}/{self.total_rounds})")
+        self.refresh()
+
+    def set_table(self, table: Table) -> None:
+        self.table = table
+        self.refresh()
+
+    def set_facts(self, **facts: str) -> None:
+        self.facts = {k: str(v) for k, v in facts.items()}
+        self.refresh()
+
+    def update(self, n: int = 1) -> None:
+        self.progress.advance(self.task_id, n)
+
+    def set_postfix_str(self, *_args, **_kwargs) -> None:
+        pass
+
+    def __enter__(self) -> "TournamentDashboard":
+        self.live.__enter__()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        return self.live.__exit__(exc_type, exc_val, exc_tb)
+
+
+ORIGIN_ORDER = ("ref", "elite", "idea2", "idea", "variant", "both", "bulk", "old")
+ORIGIN_NOTES = {
+    "ref": "your reference names", "elite": "old-pool names already selected by an earlier tournament",
+    "idea": "names from ideas (first prompt: varied roots)",
+    "idea2": "names from ideas (retuned: transparent roots)", "variant": "variants of the best names",
+    "both": "found by the idea process and already in the old pool", "bulk": "old-pool names added unselected (control)",
+    "old": "other old-pool names",
+}
+
+
+def build_origin_table(rows: Sequence[dict[str, Any]], tops: Sequence[int] = (25, 50, 100)) -> Table:
+    """One row per source: how many names, how they rate, and how many reach the top N."""
+    import statistics
+    by: dict[str, list[dict[str, Any]]] = {}
+    for r in rows:
+        by.setdefault(r.get("origin") or "old", []).append(r)
+    t = Table(title="[bold cyan]Rating by source[/]", box=box.ROUNDED, header_style="bold cyan", border_style="dim",
+              caption="Mean/median are over all names of that source; Top N counts how many of them are in the overall top N.",
+              caption_style="dim")
+    t.add_column("Source", no_wrap=True)
+    t.add_column("Names", justify="right")
+    t.add_column("Mean", justify="right")
+    t.add_column("Median", justify="right")
+    t.add_column("Best (rank)", justify="right")
+    for n in tops:
+        t.add_column(f"Top {n}", justify="right")
+    t.add_column("What it is", style="dim")
+    for origin in (o for o in ORIGIN_ORDER if o in by):
+        grp = by[origin]
+        ratings = [g["rating"] for g in grp]
+        best = min(grp, key=lambda g: g["rank"])
+        cells = [f"[bold]{origin}[/]", str(len(grp)), f"{statistics.fmean(ratings):.0f}",
+                 f"{statistics.median(ratings):.0f}", f"{max(ratings):.0f} (#{best['rank']})"]
+        for n in tops:
+            k = sum(1 for g in grp if g["rank"] <= n)
+            cells.append(f"{k}" if k else "[dim]0[/]")
+        cells.append(ORIGIN_NOTES.get(origin, ""))
+        t.add_row(*cells)
+    return t

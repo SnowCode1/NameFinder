@@ -3,13 +3,17 @@
 Python CLI pipeline for brand-name discovery: prepare vocabulary, score with an LLM, coin neologisms, check domains and trademarks, rank a final shortlist.
 
 ## Layout
-- `namefinder/cli.py` - argparse entry point (`prepare`, `score`, `coin`, `check-domains`, `check-trademarks`, `rank-final`, `refine`, `rescore`, `recompute`, `top`, `bases`, `status`)
+- `namefinder/cli.py` - argparse entry point (`prepare`, `score`, `coin`, `check-domains`, `check-trademarks`, `rank-final`, `refine`, `rescore`, `recompute`, `tournament`, `ideas`, `generate`, `evolve`, `top`, `bases`, `status`)
 - `namefinder/db.py` - SQLite schema and queries (`data/namefinder.db`)
 - `namefinder/score.py` - LLM scoring; root mode for dictionary words, brand mode for coined words
 - `namefinder/phonetics.py` - deterministic syllable/pronounceability checks
 - `namefinder/llmcoin.py` - LLM coining engine (`engine='llm'`): proposes verb-like names from top bases, same quality gate, feedback from past scores
 - `namefinder/bases.py` - base-word value (shrunk top-5% tail rate per base) and the Thompson-sampling bandit that weights base selection in `coin`
 - `namefinder/refine.py` - pass 2: re-samples the spoken-name review for the top coined words and averages it with pass 1 to stabilise rankings (`namefinder refine`); pass 1 brand scoring already spells words out via `score.spoken_review`
+- `namefinder/tournament.py` - ranks the best names against each other in groups of 5 (Elo, each group judged twice in opposite order); ratings are stored per judge model + prompt hash in `tournament_ratings`, so switching models starts a fresh rating set
+- `namefinder/ideas.py`, `ideanames.py`, `evolve.py` - idea-first generation: `ideas generate|merge|review|list|mark` makes, de-duplicates and prunes ideas (a statement about the product's mechanism or purpose plus candidate roots; angles are weighted; statuses pending/approved/rejected/merged); `generate` turns approved ideas into names (engine `idea`, with a construction note in `name_origins`); `evolve` makes variants (engine `variant`) of the best-rated names from the judge's stated flaws. `ideanames.register` is the shared gate; names already in the old pool are kept as `rediscovered` (origin row only, legacy rows untouched)
+- `namefinder/llm.py` - shared JSON chat call for the generation stages
+- `namefinder/ratings.py` - Plackett-Luce fit (with standard errors) over a judge's logged matches; the tournament refits it after every round and prunes on it
 - `namefinder/budget.py` - per-command OpenRouter spend tracking and `--max-cost` limit
 - `namefinder/console.py` - terminal UI
 - `prompts/*.md` - private, gitignored prompts (see `*.example.md`); `prompts/product.md` is the product brief (`config.PRODUCT_BLURB`) that refine and the built-in LLM coin prompt read

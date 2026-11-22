@@ -383,16 +383,20 @@ def check_github(http: httpx.Client, word: str) -> dict[str, Any]:
 def run(limit: int | None = None, refresh: bool = False, db_path=None,
         do_markbase: bool = True, do_ipgod: bool = True,
         do_pypi: bool = True, do_github: bool = True, skip_repos: bool = False,
-        top_n: int | None = None) -> None:
+        top_n: int | None = None, words: list[str] | None = None) -> None:
+    """Screen `words` if given (for example the tournament leaders); else the old pipeline's survivors."""
     qversion = config.QUESTION_VERSION
-    with db.session(db_path) as conn:
-        rows = db.words_passing_domains(conn, qversion, limit=top_n)
-        words = [r["word"] for r in rows][: limit or None]
+    explicit = bool(words)
+    if not explicit:
+        with db.session(db_path) as conn:
+            rows = db.words_passing_domains(conn, qversion, limit=top_n)
+            words = [r["word"] for r in rows][: limit or None]
 
     if not words:
         raise SystemExit("[check-trademarks] no Stage 3 survivors with available domains - run `check-domains` first")
 
-    print(f"[check-trademarks] screening {len(words)} words that have a free domain")
+    print(f"[check-trademarks] screening {len(words)} words"
+          + ("" if explicit else " that have a free domain"))
 
     if do_ipgod:
         index_ipgod(db_path)
@@ -434,8 +438,51 @@ def run(limit: int | None = None, refresh: bool = False, db_path=None,
                         conn.commit()
                 conn.commit()
 
+    if explicit:
+        show_summary(words, db_path)
+        return
     with db.session(db_path) as conn:
         survivors = db.words_passing_trademarks(conn, qversion)
         print(f"\n[check-trademarks] completely clear survivors: {len(survivors)}")
         for r in survivors[:25]:
             print(f"  {r['word']:<9} composite={r['composite']:.3f}")
+
+
+def show_summary(words: list[str], db_path=None) -> None:
+    """One table for the screened words: USPTO verdict and closest in-class mark, PyPI and GitHub collisions."""
+    from rich import box
+    from rich.table import Table
+    from . import console
+
+    t = Table(title="[bold cyan]Trademark and name-collision screen[/]", box=box.ROUNDED, expand=True,
+              header_style="bold cyan", border_style="dim",
+              caption="USPTO via Markbase (software, SaaS, data and education classes). A screen, not legal clearance.",
+              caption_style="dim")
+    t.add_column("Name", style="bold white", no_wrap=True)
+    t.add_column("USPTO", no_wrap=True)
+    t.add_column("Closest live or pending mark", ratio=2)
+    t.add_column("PyPI", no_wrap=True)
+    t.add_column("GitHub", no_wrap=True)
+    style = {"clear": "[bold green]clear[/]", "watch": "[yellow]watch[/]", "conflict": "[bold red]conflict[/]",
+             "taken": "[bold red]taken[/]", "error": "[dim]error[/]"}
+    with db.session(db_path) as conn:
+        for w in words:
+            mc = conn.execute("SELECT * FROM mark_checks WHERE word = ? AND scope LIKE 'uspto:%'", (w,)).fetchone()
+            if mc is None:
+                us, close = "[dim]not checked[/]", ""
+            else:
+                risk = f" ({mc['highest_risk']})" if mc["highest_risk"] else ""
+                us = style.get(mc["verdict"], mc["verdict"]) + risk
+                h = conn.execute(
+                    "SELECT mark, owner, similarity, live FROM mark_hits WHERE word = ? AND scope = ? "
+                    "ORDER BY similarity DESC LIMIT 1", (w, mc["scope"])).fetchone()
+                close = (f"{h['mark']}  [dim]{(h['owner'] or '')[:28]}, similarity {h['similarity']:.2f}[/]"
+                         if h and h["similarity"] is not None else "[dim]none[/]" if mc["n_hits"] == 0 else "")
+            repos = {r["source"]: r for r in conn.execute("SELECT * FROM repo_checks WHERE word = ?", (w,))}
+            def repo(src: str) -> str:
+                r = repos.get(src)
+                if r is None:
+                    return "[dim]-[/]"
+                return style.get(r["verdict"], r["verdict"])
+            t.add_row(w, us, close, repo("pypi"), repo("github"))
+    console._console.print(t)

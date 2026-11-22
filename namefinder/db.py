@@ -6,7 +6,7 @@ import json
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterable, Iterator, Sequence
+from typing import Any, Collection, Iterable, Iterator, Sequence
 
 from . import config
 
@@ -114,6 +114,58 @@ CREATE TABLE IF NOT EXISTS final_tags (
     tagged_at   TEXT,
     PRIMARY KEY (word, model)
 );
+
+-- Tournament: names ranked against each other in groups. `judge` is "<model>|<prompt hash>",
+-- so switching the judge model or its prompt starts a fresh rating set (old ones are kept).
+CREATE TABLE IF NOT EXISTS tournament_ratings (
+    word       TEXT NOT NULL,
+    judge      TEXT NOT NULL,
+    rating     REAL NOT NULL,
+    games      INTEGER NOT NULL DEFAULT 0,
+    last_note  TEXT,                    -- the judge's latest stated flaw for the name
+    updated_at TEXT,
+    PRIMARY KEY (word, judge)
+);
+
+CREATE TABLE IF NOT EXISTS tournament_matches (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    judge      TEXT NOT NULL,
+    round_no   INTEGER,
+    ranking    TEXT NOT NULL,           -- JSON list of words, best first
+    notes      TEXT,                    -- JSON {word: flaw}
+    played_at  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_tmatches_judge ON tournament_matches(judge);
+
+-- Free-form labels for rated names within one judge's set (first label wins): `elite` = old-pool names
+-- that were selected by an earlier tournament, `bulk` = old-pool names added unselected as a control.
+CREATE TABLE IF NOT EXISTS tournament_tags (
+    word  TEXT NOT NULL,
+    judge TEXT NOT NULL,
+    tag   TEXT NOT NULL,
+    PRIMARY KEY (word, judge)
+);
+
+-- Idea-first generation: an idea is one true statement about the product plus candidate roots.
+CREATE TABLE IF NOT EXISTS ideas (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    text       TEXT NOT NULL,
+    roots      TEXT,                    -- JSON [{"root", "language", "meaning"}]
+    angle      TEXT,
+    status     TEXT NOT NULL DEFAULT 'pending',   -- pending | approved | rejected
+    model      TEXT,
+    created_at TEXT
+);
+
+-- Where a generated name came from (kind: idea | variant) and how it was built.
+CREATE TABLE IF NOT EXISTS name_origins (
+    word         TEXT PRIMARY KEY,
+    kind         TEXT NOT NULL,
+    idea_id      INTEGER,
+    parent_word  TEXT,                  -- for variants: the name it improves on
+    construction TEXT,
+    created_at   TEXT
+);
 """
 
 
@@ -150,7 +202,8 @@ def connect(path: Path | str | None = None) -> sqlite3.Connection:
     conn.execute("DROP VIEW IF EXISTS active_domains")
     conn.execute(f"CREATE VIEW active_domains AS SELECT * FROM domains WHERE tld IN ({roles})")
     # Additive migrations for databases created before these columns existed
-    for table, columns in (("scores", SCORE_EXTRA_COLUMNS), ("words", WORD_EXTRA_COLUMNS)):
+    for table, columns in (("scores", SCORE_EXTRA_COLUMNS), ("words", WORD_EXTRA_COLUMNS),
+                           ("tournament_ratings", (("se", "REAL"),))):
         for col, decl in columns:
             try:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
@@ -469,8 +522,11 @@ def get_candidates_summary(
     bases_only: bool = False,
     all_domains_free: bool = False,
     spoken_only: bool = False,
+    only_words: Collection[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Return enriched rows for CLI inspection.
+
+    `only_words` restricts the candidates to those words (used to rank a tournament pool).
 
     `spoken_only` keeps names the LLM has spelled out (a say-aloud respelling from brand
     scoring or refine), dropping older rows judged by the code-side phonetics alone.
@@ -480,6 +536,8 @@ def get_candidates_summary(
 
     for r in base_rows:
         word = r["word"]
+        if only_words is not None and word not in only_words:
+            continue
         if spoken_only and not (r["say_aloud"] or r["refined"]):
             continue
         # Domains check
@@ -584,3 +642,185 @@ def upsert_final_tag(conn: sqlite3.Connection, row: dict[str, Any]) -> None:
 
 def dump_json(obj: Any) -> str:
     return json.dumps(obj, ensure_ascii=False)
+
+
+# --- tournament ------------------------------------------------------------
+def tournament_ratings(conn: sqlite3.Connection, judge: str) -> dict[str, sqlite3.Row]:
+    rows = conn.execute("SELECT * FROM tournament_ratings WHERE judge = ?", (judge,)).fetchall()
+    return {r["word"]: r for r in rows}
+
+
+def tournament_round_count(conn: sqlite3.Connection, judge: str) -> int:
+    return conn.execute(
+        "SELECT COALESCE(MAX(round_no), 0) FROM tournament_matches WHERE judge = ?", (judge,)
+    ).fetchone()[0]
+
+
+def save_tournament_match(
+    conn: sqlite3.Connection, judge: str, round_no: int, ranking: Sequence[str],
+    notes: dict[str, str], ts: str,
+) -> None:
+    conn.execute(
+        "INSERT INTO tournament_matches (judge, round_no, ranking, notes, played_at) VALUES (?, ?, ?, ?, ?)",
+        (judge, round_no, dump_json(list(ranking)), dump_json(notes), ts),
+    )
+
+
+def save_tournament_rating(
+    conn: sqlite3.Connection, judge: str, word: str, rating: float, games: int,
+    note: str | None, ts: str,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO tournament_ratings (word, judge, rating, games, last_note, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(word, judge) DO UPDATE SET
+            rating = excluded.rating, games = excluded.games,
+            last_note = COALESCE(excluded.last_note, tournament_ratings.last_note),
+            updated_at = excluded.updated_at
+        """,
+        (word, judge, rating, games, note, ts),
+    )
+
+
+def tournament_pool(conn: sqlite3.Connection, qversion: str, size: int, tld: str = "com") -> list[str]:
+    """Best coined names by composite whose `tld` domain is free."""
+    rows = conn.execute(
+        """
+        SELECT s.word FROM scores s
+        JOIN words w ON w.word = s.word AND w.source = 'coined'
+        JOIN domains d ON d.word = s.word AND d.tld = ? AND d.status = 'available'
+        WHERE s.qversion = ?
+        GROUP BY s.word
+        ORDER BY s.composite DESC
+        LIMIT ?
+        """,
+        (tld, qversion, size),
+    ).fetchall()
+    return [r["word"] for r in rows]
+
+
+# --- ideas and name origins -------------------------------------------------
+def _norm_idea(text: str) -> str:
+    return " ".join(text.lower().split())
+
+
+def add_idea(conn: sqlite3.Connection, text: str, roots: Any, angle: str, model: str, ts: str) -> int | None:
+    """Insert a pending idea; None if the same text already exists."""
+    key = _norm_idea(text)
+    for r in conn.execute("SELECT text FROM ideas"):
+        if _norm_idea(r["text"]) == key:
+            return None
+    cur = conn.execute(
+        "INSERT INTO ideas (text, roots, angle, status, model, created_at) VALUES (?, ?, ?, 'pending', ?, ?)",
+        (text.strip(), dump_json(roots or []), angle, model, ts),
+    )
+    return cur.lastrowid
+
+
+def list_ideas(conn: sqlite3.Connection, status: str | None = None) -> list[sqlite3.Row]:
+    if status:
+        return conn.execute("SELECT * FROM ideas WHERE status = ? ORDER BY id", (status,)).fetchall()
+    return conn.execute("SELECT * FROM ideas ORDER BY id").fetchall()
+
+
+def set_idea(
+    conn: sqlite3.Connection, idea_id: int, status: str | None = None, text: str | None = None,
+    roots: Any = None,
+) -> None:
+    if status:
+        conn.execute("UPDATE ideas SET status = ? WHERE id = ?", (status, idea_id))
+    if text:
+        conn.execute("UPDATE ideas SET text = ? WHERE id = ?", (text.strip(), idea_id))
+    if roots is not None:
+        conn.execute("UPDATE ideas SET roots = ? WHERE id = ?", (dump_json(roots), idea_id))
+
+
+def add_origin(
+    conn: sqlite3.Connection, word: str, kind: str, idea_id: int | None,
+    parent_word: str | None, construction: str | None, ts: str,
+) -> None:
+    conn.execute(
+        "INSERT OR IGNORE INTO name_origins (word, kind, idea_id, parent_word, construction, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (word, kind, idea_id, parent_word, (construction or "")[:200], ts),
+    )
+
+
+def tournament_flaws(conn: sqlite3.Connection, judge: str, n: int = 3) -> dict[str, list[str]]:
+    """Up to n distinct flaws the judge has named for each word, newest first."""
+    out: dict[str, list[str]] = {}
+    rows = conn.execute(
+        "SELECT notes FROM tournament_matches WHERE judge = ? ORDER BY id DESC", (judge,)
+    ).fetchall()
+    for r in rows:
+        try:
+            notes = json.loads(r["notes"] or "{}")
+        except ValueError:
+            continue
+        for w, flaw in notes.items():
+            flaw = (flaw or "").strip()
+            if not flaw or flaw.lower() == "none":
+                continue
+            lst = out.setdefault(w, [])
+            if flaw not in lst and len(lst) < n:
+                lst.append(flaw)
+    return out
+
+
+def tournament_pool_ideas(conn: sqlite3.Connection, judge: str, tld: str, carry: int) -> list[str]:
+    """Idea- and variant-engine names with a free `tld`, plus the `carry` best-rated names already in the ratings."""
+    carried = [
+        r["word"] for r in conn.execute(
+            "SELECT word FROM tournament_ratings WHERE judge = ? ORDER BY rating DESC LIMIT ?", (judge, carry)
+        )
+    ]
+    fresh = [
+        r["word"] for r in conn.execute(
+            """
+            SELECT w.word FROM words w
+            JOIN domains d ON d.word = w.word AND d.tld = ? AND d.status = 'available'
+            WHERE w.engine IN ('idea', 'variant') OR w.word IN (SELECT word FROM name_origins)
+            GROUP BY w.word ORDER BY w.created_at, w.word
+            """,
+            (tld,),
+        )
+    ]
+    return list(dict.fromkeys(carried + fresh))
+
+
+def tag_words(conn: sqlite3.Connection, judge: str, words: Iterable[str], tag: str) -> int:
+    """Label words within a judge's set; a word that already has a label keeps it."""
+    n = 0
+    for w in words:
+        n += conn.execute(
+            "INSERT OR IGNORE INTO tournament_tags (word, judge, tag) VALUES (?, ?, ?)", (w, judge, tag)
+        ).rowcount
+    return n
+
+
+def tournament_tags(conn: sqlite3.Connection, judge: str) -> dict[str, str]:
+    return {r["word"]: r["tag"] for r in conn.execute("SELECT word, tag FROM tournament_tags WHERE judge = ?", (judge,))}
+
+
+def save_tournament_fit(
+    conn: sqlite3.Connection, judge: str, rating: dict[str, float], se: dict[str, float],
+    games: dict[str, int], notes: dict[str, str], ts: str,
+) -> None:
+    """Write a whole Plackett-Luce fit at once; a name's last flaw note is kept unless a new one is given."""
+    conn.executemany(
+        """
+        INSERT INTO tournament_ratings (word, judge, rating, games, last_note, updated_at, se)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(word, judge) DO UPDATE SET
+            rating = excluded.rating, games = excluded.games, se = excluded.se,
+            last_note = COALESCE(excluded.last_note, tournament_ratings.last_note),
+            updated_at = excluded.updated_at
+        """,
+        [(w, judge, rating[w], games.get(w, 0), notes.get(w), ts, se.get(w)) for w in rating],
+    )
+
+
+def tournament_match_rankings(conn: sqlite3.Connection, judge: str) -> list[list[str]]:
+    return [json.loads(r["ranking"]) for r in conn.execute(
+        "SELECT ranking FROM tournament_matches WHERE judge = ? ORDER BY id", (judge,))]

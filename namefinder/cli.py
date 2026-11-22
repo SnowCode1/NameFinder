@@ -123,6 +123,10 @@ Scoring Examples:
     p4.add_argument("--no-ipgod", action="store_true", help="skip IP Australia local CSVs")
     p4.add_argument("--no-pypi", action="store_true")
     p4.add_argument("--no-github", action="store_true")
+    p4.add_argument("--word", action="append", default=None, metavar="WORD",
+                    help="screen this name instead of the old pipeline's survivors (repeatable)")
+    p4.add_argument("--tournament", type=int, default=None, metavar="N",
+                    help="screen the top N names by tournament rating instead of the old pipeline's survivors")
 
     p5 = sub.add_parser("rank-final", help="stage 5: tag and write the shortlist")
     _add_common(p5)
@@ -153,6 +157,123 @@ Scoring Examples:
     p_ref.add_argument("--clean", action="store_true",
                        help="review only coined words clear of trademark conflicts (same as `top --clean`)")
 
+    p_tour = sub.add_parser(
+        "tournament",
+        help="rank the best names against each other in groups of 5 (Elo), instead of scoring each alone",
+    )
+    _add_common(p_tour)
+    p_tour.add_argument("--pool", type=int, default=300,
+                        help="how many top coined names with a free domain to enter (default: %(default)s)")
+    p_tour.add_argument("--rounds", type=int, default=6,
+                        help="rounds to play now; each shows every name in two groups of 5 (default: %(default)s)")
+    p_tour.add_argument("--ref", action="append", default=[], metavar="WORD",
+                        help="reference name that always enters (repeatable; also read from prompts/tournament_refs.txt)")
+    p_tour.add_argument("--tld", default="com", help="domain that must be free for pool names (default: %(default)s)")
+    p_tour.add_argument("--model", default=None,
+                        help="judge model (default: OPENROUTER_TOURNAMENT_MODEL, else the scoring model). "
+                             "Ratings are kept per model and judge prompt.")
+    p_tour.add_argument("--backend", choices=["openrouter", "local", "lmstudio"], default=None)
+    p_tour.add_argument("--concurrency", type=int, default=config.SCORE_CONCURRENCY,
+                        help="parallel requests for cloud backends (default: %(default)s)")
+    p_tour.add_argument("--max-cost", type=float, default=None, help=_MAX_COST_HELP)
+    p_tour.add_argument("--show", type=int, default=30, help="rows of the final ranking to print (default: %(default)s)")
+    p_tour.add_argument("--show-only", action="store_true", help="print the stored ranking without calling the judge")
+    p_tour.add_argument("--seed", type=int, default=None, help="seed for grouping, for repeatable runs")
+    p_tour.add_argument("--source", choices=["score", "ideas", "both", "rated"], default="score",
+                        help="where the pool comes from: top old-composite coined names (default); names made by "
+                             "`generate`/`evolve` plus the best-rated names carried over as competition (ideas); "
+                             "or everything already rated + the idea names + the top --pool old names, with the "
+                             "old names tagged elite/bulk so the groups can be compared (both); or the top --pool "
+                             "names already rated plus any unrated idea/variant names, to confirm the leaders (rated)")
+    p_tour.add_argument("--prune-below", default=None, metavar="WORD",
+                        help="stop playing names rated more than --margin below this name (e.g. origalia), once they "
+                             "have --min-games games; reference names are never pruned")
+    p_tour.add_argument("--prune-rank", type=int, default=100, metavar="N",
+                        help="stop playing names that are clearly below the Nth best name: rating + --z standard "
+                             "errors still under it (default: %(default)s; combined with --prune-below, the stricter "
+                             "cut applies)")
+    p_tour.add_argument("--no-prune", action="store_true", help="play every name in the pool every round")
+    p_tour.add_argument("--z", type=float, default=2.0,
+                        help="standard errors of benefit of the doubt before a name is pruned (default: %(default)s)")
+    p_tour.add_argument("--margin", type=float, default=0.0,
+                        help="extra rating points of slack below the pruning cut (default: %(default)s)")
+    p_tour.add_argument("--min-games", type=int, default=4,
+                        help="games a name needs before it can be pruned (default: %(default)s)")
+    p_tour.add_argument("--group-size", type=int, default=8,
+                        help="names per judged group (default: %(default)s; measured cheaper per comparison than 5)")
+    p_tour.add_argument("--refit", action="store_true",
+                        help="refit the ratings from the stored matches (no API calls), then show the ranking")
+    p_tour.add_argument("--carry", type=int, default=60,
+                        help="with --source ideas: how many of the best-rated names to carry in (default: %(default)s)")
+
+    p_ideas = sub.add_parser("ideas", help="idea-first naming, step 1: generate ideas, review them, list them")
+    ideas_sub = p_ideas.add_subparsers(dest="ideas_cmd", required=True)
+    pi_gen = ideas_sub.add_parser("generate", help="have the model propose ideas (true statements + roots) per angle")
+    _add_common(pi_gen)
+    pi_gen.add_argument("--per-angle", type=int, default=5,
+                        help="base ideas per angle, scaled by each angle's weight (default: %(default)s)")
+    pi_gen.add_argument("--angle", action="append", default=None, metavar="NAME",
+                        help="only this angle (repeatable): origin, spread, evidence, discovery, gaps, "
+                             "synthesis, inquiry, time, alteration, exploration")
+    pi_gen.add_argument("--no-merge", action="store_true",
+                        help="do not merge near-duplicate ideas after generating")
+    pi_gen.add_argument("--model", default=None, help="model id (default: OPENROUTER_IDEAS_MODEL, else the scoring model)")
+    pi_gen.add_argument("--backend", choices=["openrouter", "local", "lmstudio"], default=None)
+    pi_gen.add_argument("--concurrency", type=int, default=config.SCORE_CONCURRENCY)
+    pi_gen.add_argument("--max-cost", type=float, default=None, help=_MAX_COST_HELP)
+    pi_mrg = ideas_sub.add_parser("merge", help="merge near-duplicate pending ideas, combining their roots")
+    _add_common(pi_mrg)
+    pi_mrg.add_argument("--model", default=None, help="model id (default: OPENROUTER_IDEAS_MODEL)")
+    pi_mrg.add_argument("--backend", choices=["openrouter", "local", "lmstudio"], default=None)
+    pi_mrg.add_argument("--max-cost", type=float, default=None, help=_MAX_COST_HELP)
+    pi_rev = ideas_sub.add_parser("review", help="walk through pending ideas: approve, reject or edit each")
+    _add_common(pi_rev)
+    pi_rev.add_argument("--status", default="pending", choices=["pending", "approved", "rejected"],
+                        help="which ideas to walk through (default: %(default)s)")
+    pi_list = ideas_sub.add_parser("list", help="show ideas with their roots and status")
+    _add_common(pi_list)
+    pi_list.add_argument("--status", default=None, choices=["pending", "approved", "rejected", "merged"])
+    pi_mark = ideas_sub.add_parser("mark", help="approve or reject ideas by id without the interactive review")
+    _add_common(pi_mark)
+    pi_mark.add_argument("--approve", type=int, nargs="*", default=[], metavar="ID")
+    pi_mark.add_argument("--reject", type=int, nargs="*", default=[], metavar="ID")
+
+    p_gen = sub.add_parser("generate", help="idea-first naming, step 2: invent names from approved ideas")
+    _add_common(p_gen)
+    p_gen.add_argument("--per-idea", type=int, default=20, help="names requested per idea (default: %(default)s)")
+    p_gen.add_argument("--no-feedback", action="store_true",
+                       help="do not show the model the best-rated names and the judge's flaws (for A/B tests)")
+    p_gen.add_argument("--idea", type=int, action="append", default=None, metavar="ID",
+                       help="only this approved idea (repeatable)")
+    p_gen.add_argument("--model", default=None, help="model id (default: OPENROUTER_NAMEGEN_MODEL, else the scoring model)")
+    p_gen.add_argument("--backend", choices=["openrouter", "local", "lmstudio"], default=None)
+    p_gen.add_argument("--concurrency", type=int, default=config.SCORE_CONCURRENCY)
+    p_gen.add_argument("--min-len", type=int, default=5)
+    p_gen.add_argument("--max-len", type=int, default=10)
+    p_gen.add_argument("--no-domains", action="store_true", help="skip the domain check")
+    p_gen.add_argument("--all-tlds", action="store_true",
+                       help="check every configured domain, not just .com (much slower: .dev is rate-limited)")
+    p_gen.add_argument("--max-cost", type=float, default=None, help=_MAX_COST_HELP)
+
+    p_evo = sub.add_parser(
+        "evolve",
+        help="idea-first naming, step 3: improve the best-rated names using the tournament judge's critique",
+    )
+    _add_common(p_evo)
+    p_evo.add_argument("--top", type=int, default=20, help="how many of the best-rated names to improve (default: %(default)s)")
+    p_evo.add_argument("--variants", type=int, default=4, help="variants requested per name (default: %(default)s)")
+    p_evo.add_argument("--no-refs", action="store_true", help="do not make variants of your reference names")
+    p_evo.add_argument("--model", default=None, help="model id (default: OPENROUTER_NAMEGEN_MODEL, else the scoring model)")
+    p_evo.add_argument("--judge", default=None, metavar="MODEL", help="whose tournament ratings to read (default: configured judge)")
+    p_evo.add_argument("--backend", choices=["openrouter", "local", "lmstudio"], default=None)
+    p_evo.add_argument("--concurrency", type=int, default=config.SCORE_CONCURRENCY)
+    p_evo.add_argument("--min-len", type=int, default=5)
+    p_evo.add_argument("--max-len", type=int, default=10)
+    p_evo.add_argument("--no-domains", action="store_true", help="skip the domain check")
+    p_evo.add_argument("--all-tlds", action="store_true",
+                       help="check every configured domain, not just .com (much slower: .dev is rate-limited)")
+    p_evo.add_argument("--max-cost", type=float, default=None, help=_MAX_COST_HELP)
+
     p_top = sub.add_parser("top", help="inspect candidate rankings directly in the terminal")
     _add_common(p_top)
     p_top.add_argument("--top", "-n", dest="top_count", type=int, default=25,
@@ -167,6 +288,12 @@ Scoring Examples:
                        help="show only names with an LLM pronunciation review (spelled out in scoring or refine)")
     p_top.add_argument("--bases-only", action="store_true",
                        help="show only dictionary base words (exclude coined names)")
+    p_top.add_argument("--by", choices=["score", "tournament"], default="score",
+                       help="rank by the composite score (default) or by tournament rating (rated names only). "
+                            "Either way, rated names show an Elo column")
+    p_top.add_argument("--judge", default=None, metavar="MODEL",
+                       help="whose tournament ratings to use (default: the configured tournament model, "
+                            "else the latest rating set)")
     p_top.add_argument("--since", default=config.TOP_SINCE, metavar="AGE",
                        help="mark names scored (NEW) or refined (REF) within this window: s, m, h, d or w units, "
                             "combinable and spellable in full (30s, 10m, 1h30m, 6h, 2d, 1w, '2 days'); a bare "
@@ -317,20 +444,36 @@ def _mark_fresh(items: list[dict], window: timedelta | None) -> None:
 
 def cmd_top(db_path, limit: int = 25, only_free: bool = False, only_clean: bool = False,
             bases_only: bool = False, all_free: bool = False,
-            since: str = config.TOP_SINCE, new_only: bool = False, spoken_only: bool = False) -> None:
+            since: str = config.TOP_SINCE, new_only: bool = False, spoken_only: bool = False,
+            by: str = "score", judge_model: str | None = None) -> None:
+    from . import tournament
     window = _parse_age(since)
     if new_only and not window:
         raise SystemExit("--new needs a non-zero --since window")
     with db.session(db_path) as conn:
         qversion = config.QUESTION_VERSION
+        judge, judge_note = tournament.resolve_judge(conn, judge_model)
+        rated = db.tournament_ratings(conn, judge) if judge else {}
+        if by == "tournament" and not rated:
+            raise SystemExit(judge_note or "No tournament ratings yet. Run `namefinder tournament` first.")
+        order = sorted(rated, key=lambda w: rated[w]["rating"], reverse=True)
+        elo_rank = {w: i for i, w in enumerate(order, 1)}
         items = db.get_candidates_summary(
-            conn, qversion, limit=10**9 if new_only else limit,
+            conn, qversion, limit=10**9 if (new_only or by == "tournament") else limit,
             only_free_domains=only_free,
             only_clean_trademarks=only_clean,
             bases_only=bases_only,
             all_domains_free=all_free,
             spoken_only=spoken_only,
+            only_words=set(rated) if by == "tournament" else None,
         )
+        for it in items:
+            r = rated.get(it["word"])
+            it["elo"] = r["rating"] if r else None
+            it["elo_rank"] = elo_rank.get(it["word"])
+        if by == "tournament":
+            items.sort(key=lambda it: it["elo"], reverse=True)
+            items = items[:10**9 if new_only else limit]
         _mark_fresh(items, window)
         if new_only:
             items = [it for it in items if it["fresh"]][:limit]
@@ -348,6 +491,8 @@ def cmd_top(db_path, limit: int = 25, only_free: bool = False, only_clean: bool 
             filter_desc.append("clean trademarks only")
         if spoken_only:
             filter_desc.append("pronunciation-reviewed only")
+        if by == "tournament":
+            filter_desc.insert(0, f"by tournament rating, judge {judge}")
         filters_str = f" ({', '.join(filter_desc)})" if filter_desc else ""
 
         legend = "✓ = refined"
@@ -366,6 +511,8 @@ def cmd_top(db_path, limit: int = 25, only_free: bool = False, only_clean: bool 
             show_domains=True,
             show_reasoning=True,
         )
+        if judge_note and (by == "tournament" or any(it["elo"] is not None for it in items[:limit])):
+            print(console.dim(f"  note: {judge_note}"))
 
 
 def cmd_bases(db_path, limit: int = 30, sort: str = "rate", min_names: int = 0, spoken_only: bool = False) -> None:
@@ -433,10 +580,26 @@ def cmd_status(db_path) -> None:
             console.print_leaderboard(top5, title="Top 5 Candidates Preview", limit=5)
 
 
+def _screen_words(args) -> list[str] | None:
+    """Names for `check-trademarks`: --word entries and/or the top --tournament N, else None (old behaviour)."""
+    words = [w.strip().lower() for w in (args.word or []) if w.strip()]
+    if args.tournament:
+        from . import tournament
+        with db.session(args.db) as conn:
+            judge, note = tournament.resolve_judge(conn)
+            if not judge:
+                raise SystemExit(note or "No tournament ratings yet. Run `namefinder tournament` first.")
+            rows = conn.execute(
+                "SELECT word FROM tournament_ratings WHERE judge = ? ORDER BY rating DESC LIMIT ?",
+                (judge, args.tournament)).fetchall()
+        words += [r["word"] for r in rows]
+    return list(dict.fromkeys(words)) or None
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
-    if args.cmd in ("score", "score-jev", "refine", "coin", "rescore"):
+    if args.cmd in ("score", "score-jev", "refine", "coin", "rescore", "tournament", "ideas", "generate", "evolve"):
         budget.reset(getattr(args, "max_cost", None))
 
     try:
@@ -460,7 +623,7 @@ def main(argv: list[str] | None = None) -> int:
             trademarks.run(limit=args.limit, refresh=args.refresh, db_path=args.db,
                            do_markbase=not args.no_markbase, do_ipgod=not args.no_ipgod,
                            do_pypi=not args.no_pypi, do_github=not args.no_github,
-                           top_n=args.top_n)
+                           top_n=args.top_n, words=_screen_words(args))
         elif args.cmd == "rank-final":
             from . import final
             final.run(limit=args.limit, refresh=args.refresh, model=args.model,
@@ -471,10 +634,46 @@ def main(argv: list[str] | None = None) -> int:
                        refresh=args.refresh, free_domains_only=args.free_domains_only,
                        all_free=args.all_free, clean_only=args.clean, db_path=args.db,
                        concurrency=args.concurrency)
+        elif args.cmd == "tournament":
+            from . import tournament
+            tournament.run(pool_size=args.pool, rounds=args.rounds, model=args.model, refs=args.ref,
+                           tld=args.tld, concurrency=args.concurrency, backend=args.backend,
+                           show=args.show, show_only=args.show_only, db_path=args.db, seed=args.seed,
+                           source=args.source, carry=args.carry,
+                           prune_below=None if args.no_prune else args.prune_below,
+                           prune_rank=None if args.no_prune else args.prune_rank,
+                           margin=args.margin, min_games=args.min_games, z=args.z,
+                           group_size=args.group_size, refit_only=args.refit)
+        elif args.cmd == "ideas":
+            from . import ideas
+            if args.ideas_cmd == "generate":
+                ideas.generate(per_angle=args.per_angle, angles=args.angle, model=args.model,
+                               backend=args.backend, concurrency=args.concurrency,
+                               merge_after=not args.no_merge, db_path=args.db)
+            elif args.ideas_cmd == "merge":
+                ideas.merge(model=args.model, backend=args.backend, db_path=args.db)
+            elif args.ideas_cmd == "review":
+                ideas.review(status=args.status, db_path=args.db)
+            elif args.ideas_cmd == "list":
+                ideas.show_list(status=args.status, db_path=args.db)
+            elif args.ideas_cmd == "mark":
+                ideas.mark(args.approve, args.reject, db_path=args.db)
+        elif args.cmd == "generate":
+            from . import ideanames
+            ideanames.run(per_idea=args.per_idea, idea_ids=args.idea, model=args.model, backend=args.backend,
+                          concurrency=args.concurrency, min_len=args.min_len, max_len=args.max_len,
+                          check=not args.no_domains, use_feedback=not args.no_feedback, all_tlds=args.all_tlds, db_path=args.db)
+        elif args.cmd == "evolve":
+            from . import evolve
+            evolve.run(top=args.top, variants=args.variants, include_refs=not args.no_refs, model=args.model,
+                       backend=args.backend, concurrency=args.concurrency, min_len=args.min_len,
+                       max_len=args.max_len, check=not args.no_domains, judge_model=args.judge,
+                       all_tlds=args.all_tlds, db_path=args.db)
         elif args.cmd == "top":
             cmd_top(args.db, limit=args.top_count, only_free=args.free_domains, only_clean=args.clean,
                     bases_only=args.bases_only, all_free=args.all_free,
-                    since=args.since, new_only=args.new_only, spoken_only=args.spoken)
+                    since=args.since, new_only=args.new_only, spoken_only=args.spoken,
+                    by=args.by, judge_model=args.judge)
         elif args.cmd == "bases":
             cmd_bases(args.db, limit=args.top_count, sort=args.sort, min_names=args.min_names,
                       spoken_only=args.spoken)
