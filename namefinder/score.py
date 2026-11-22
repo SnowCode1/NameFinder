@@ -7,7 +7,9 @@ memorability, cleanliness, and novelty.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+import math
 import re
 import sys
 from datetime import datetime, timezone
@@ -94,10 +96,98 @@ It rates how naturally the word works as a verb in the sentence "I just ___ it a
 1.0 = reads instantly as a verb: short, punchy, takes -ed/-ing cleanly. 0.5 = usable but a little forced.
 0.0 = awkward or noun-only ("I just latticed it" is a 0.2). Judge the sentence, not the product fit."""
 
+# Brand mode only, appended in code like the verbable addendum. The spelled-out keys come
+# right after "word" so the model works through the sound before it commits to any score.
+SPOKEN_ADDENDUM = """
+
+Before scoring each candidate, work through how it is SPOKEN. Put these four keys straight after "word",
+before every score, in this order:
+- "syllables": the word split into syllables with hyphens (e.g. "met-a-prism")
+- "say_aloud": a plain-English respelling with the stressed syllable in CAPITALS (e.g. "MET-uh-prizm")
+- "heard_spelling": how a listener would most likely spell it after hearing it once on a phone call
+- "misheard_as": real words or phrases it could be mistaken for, or crude/awkward sound-alikes ("" if none)
+Let that spoken analysis drive "natural" and "spellable". After the other scores, also add:
+- "sayable": float 0.0-1.0, how easy and pleasant it is to say aloud (1.0 = flows, 0.3 = tongue-twister or clumsy)
+- "ambiguity": float 0.0-1.0, chance a listener spells it wrong or a reader says it wrong; at least 0.4 if
+  heard_spelling differs from the word
+- "mishear_risk": float 0.0-1.0, how damaging the sound-alikes in misheard_as are (0 if none)
+Most invented words are mediocre to say; use the full range."""
+
+SPOKEN_TEXT_KEYS = ("syllables", "say_aloud", "heard_spelling", "misheard_as")
+REQUIRED_SCORE_KEYS = ("fit", "natural", "spellable", "memorable")
+
+
+def _unit(v: Any) -> float | None:
+    try:
+        return max(0.0, min(1.0, float(v)))
+    except (TypeError, ValueError):
+        return None
+
+
+def _text(v: Any) -> str:
+    if isinstance(v, (list, tuple)):
+        v = ", ".join(str(x) for x in v if x)
+    return str(v or "").strip()
+
+
+def spoken_review(word: str, item: dict[str, Any]) -> dict[str, Any]:
+    """Blend a model's spoken-name answers with the deterministic checks in `phonetics.py`.
+
+    Used by brand scoring (one sample) and by refine (averaged samples). Without a
+    "sayable" answer it falls back to the deterministic checks alone.
+    """
+    det = phonetics.analyze(word)
+    sayable = _unit(item.get("sayable"))
+    if sayable is None:
+        return {"phonetic": det.score, "ambiguity": det.ambiguity, "syllables": det.split,
+                "say_aloud": None, "misheard_as": None, "mishear_risk": 0.0, "spoken": False}
+    amb = _unit(item.get("ambiguity"))
+    amb = det.ambiguity if amb is None else amb
+    heard = _text(item.get("heard_spelling")).lower()
+    if heard and heard != word.lower():
+        amb = max(amb, 0.4)            # the rubric's rule, enforced rather than trusted
+    llm_phonetic = sayable * (1.0 - 0.5 * amb)
+    return {
+        "phonetic": round(0.5 * det.score + 0.5 * llm_phonetic, 4),
+        "ambiguity": round(0.5 * det.ambiguity + 0.5 * amb, 4),
+        "syllables": _text(item.get("syllables")) or det.split,
+        "say_aloud": _text(item.get("say_aloud"))[:120] or None,
+        "misheard_as": _text(item.get("misheard_as"))[:200] or None,
+        "mishear_risk": _unit(item.get("mishear_risk")) or 0.0,
+        "spoken": True,
+    }
+
+
 ROOT_SYSTEM_PROMPT = config.load_prompt("root_prompt.md", DEFAULT_ROOT_SYSTEM_PROMPT)
 BRAND_SYSTEM_PROMPT = config.load_prompt("system_prompt.md", DEFAULT_SYSTEM_PROMPT)
 OPENROUTER_SYSTEM_PROMPT = BRAND_SYSTEM_PROMPT
 OPENROUTER_USER_PROMPT = config.load_prompt("user_prompt.md", DEFAULT_USER_PROMPT)
+
+
+def prompts_for(is_root: bool) -> tuple[str, str]:
+    """(system, user) prompts for root or brand scoring; the user prompt still has {words} to fill."""
+    if is_root:
+        return ROOT_SYSTEM_PROMPT, OPENROUTER_USER_PROMPT
+    user_prompt = OPENROUTER_USER_PROMPT
+    if '"verbable"' not in user_prompt:
+        user_prompt += VERBABLE_ADDENDUM.replace("{", "{{").replace("}", "}}")
+    if '"say_aloud"' not in user_prompt:
+        user_prompt += SPOKEN_ADDENDUM.replace("{", "{{").replace("}", "}}")
+    return BRAND_SYSTEM_PROMPT, user_prompt
+
+
+def prompt_fingerprint(is_root: bool = False) -> str:
+    """Short hash of the scoring prompts, stored in each row's raw JSON so `rescore` knows what is current."""
+    system, user = prompts_for(is_root)
+    return hashlib.sha1((system + "\n\x00\n" + user).encode("utf-8")).hexdigest()[:10]
+
+
+def row_prompt(raw: str | None) -> str | None:
+    """The prompt fingerprint a score row was produced with (None for rows scored before fingerprints)."""
+    try:
+        return (json.loads(raw or "{}") or {}).get("prompt")
+    except (TypeError, ValueError, AttributeError):
+        return None
 
 
 def composite_root(
@@ -286,10 +376,8 @@ async def score_words_openrouter(
             ).fetchone()[0]
             is_root = coined_count == 0
 
-        active_system_prompt = ROOT_SYSTEM_PROMPT if is_root else BRAND_SYSTEM_PROMPT
-        user_prompt = OPENROUTER_USER_PROMPT
-        if not is_root and '"verbable"' not in user_prompt:
-            user_prompt += VERBABLE_ADDENDUM.replace("{", "{{").replace("}", "}}")
+        active_system_prompt, user_prompt = prompts_for(is_root)
+        prompt_id = prompt_fingerprint(is_root)
 
         async with net.async_client(timeout=120.0) as http:
             def advance(n: int) -> None:
@@ -311,7 +399,8 @@ async def score_words_openrouter(
                         {"role": "user", "content": user_prompt.format(words=", ".join(chunk))},
                     ],
                     "temperature": 0.2,
-                    "max_tokens": 3500,
+                    # the spoken review adds ~60 output tokens per brand word
+                    "max_tokens": 3500 if is_root else 3500 + 80 * len(chunk),
                     **config.openrouter_extras(url),
                 }
 
@@ -369,21 +458,31 @@ async def score_words_openrouter(
                     advance(len(chunk))
                     return
 
-                by_word = {str(item.get("word", "")).strip().lower(): item for item in parsed}
+                # The model sometimes splits one word into two objects (spoken keys, then
+                # scores); merge them so neither half is lost.
+                by_word: dict[str, dict[str, Any]] = {}
+                for item in parsed:
+                    by_word.setdefault(str(item.get("word", "")).strip().lower(), {}).update(item)
                 now_ts = _now()
+                missing = 0
                 for w in chunk:
                     item = by_word.get(w.lower())
                     if not item:
                         continue
+                    # Never invent scores: a word without them is left unscored.
+                    if any(item.get(k) is None for k in REQUIRED_SCORE_KEYS):
+                        missing += 1
+                        continue
                     try:
-                        fit = float(item.get("fit", 0.5))
-                        natural = float(item.get("natural", 0.8))
-                        spellable = float(item.get("spellable", 0.8))
-                        memorable = float(item.get("memorable", 2.0))
+                        fit = float(item["fit"])
+                        natural = float(item["natural"])
+                        spellable = float(item["spellable"])
+                        memorable = float(item["memorable"])
                         neg = float(item.get("neg", 0.0))
                         taken = float(item.get("taken", 0.0))
                         common = float(item.get("common", 0.0))
                     except (TypeError, ValueError):
+                        missing += 1
                         continue
 
                     why_text = str(item.get("why", "")).strip()[:450] or None
@@ -402,11 +501,12 @@ async def score_words_openrouter(
 
                     if is_root:
                         comp_score = composite_root(fit, natural, spellable, memorable, neg)
-                        ph = None
+                        sp = None
                     else:
+                        sp = spoken_review(w, item)
+                        neg = max(neg, sp["mishear_risk"])     # a damaging sound-alike is a connotation risk
                         comp_score = composite_brand(fit, natural, spellable, memorable, neg, taken, common, verbable)
-                        ph = phonetics.analyze(w)
-                        comp_score = adjust_brand_composite(conn, w, comp_score, ph.score)
+                        comp_score = adjust_brand_composite(conn, w, comp_score, sp["phonetic"])
 
                     row = {
                         "word": w,
@@ -422,17 +522,22 @@ async def score_words_openrouter(
                         "composite": comp_score,
                         "why": why_text,
                         "why_not": why_not_text,
-                        "raw": json.dumps({"openrouter": item}, default=str)[:20000],
+                        "raw": json.dumps({"openrouter": item, "prompt": prompt_id}, default=str)[:20000],
                         "scored_at": now_ts,
-                        "syllables": ph.split if ph else None,
-                        "ambiguity": ph.ambiguity if ph else None,
-                        "phonetic": ph.score if ph else None,
+                        "syllables": sp["syllables"] if sp else None,
+                        "say_aloud": sp["say_aloud"] if sp else None,
+                        "misheard_as": sp["misheard_as"] if sp else None,
+                        "ambiguity": sp["ambiguity"] if sp else None,
+                        "phonetic": sp["phonetic"] if sp else None,
                         "verbable": verbable,
                     }
                     db.upsert_score(conn, row)
                     done += 1
 
                 conn.commit()
+                if missing:
+                    failed += missing
+                    tqdm.write(f"[score] {missing} words came back without scores; left unscored (`score --mode brand` picks them up)", file=sys.stderr)
                 advance(len(chunk))
 
             sem = asyncio.Semaphore(max(1, concurrency))
@@ -572,3 +677,66 @@ def run(
         print(budget.summary())
     with db.session(db_path) as conn:
         console.show_live_top_10(conn, qversion, title=f"Top {sample} Scored Candidates", limit=sample)
+
+
+def rescore_run(
+    top_n: int,
+    model: str | None = None,
+    backend: str | None = None,
+    concurrency: int | None = None,
+    db_path=None,
+    backup: bool = True,
+) -> None:
+    """Re-score the `top_n` best coined names still scored with an older brand prompt.
+
+    Rows are overwritten in place (a failed word keeps its old score), so the ranking stays
+    usable while it runs. Each row records the prompt fingerprint it was scored with, so a
+    rerun skips names already current and continues down the list. Re-scored rows lose their
+    refine flag, since the averaged review no longer matches the new pass-1 sample.
+    """
+    qversion = config.QUESTION_VERSION
+    current = prompt_fingerprint(is_root=False)
+    if backend in ("local", "lmstudio"):
+        api_url, api_key = "http://localhost:1234/v1", "lm-studio"
+        model = model or "qwen3-4b-instruct-2507"
+    else:
+        api_url, api_key = None, None
+        model = model or config.SCORE_MODEL
+    concurrency = max(1, concurrency or config.COIN_CONCURRENCY)
+
+    with db.session(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT s.word, s.raw FROM scores s JOIN words w ON w.word = s.word
+            WHERE s.qversion = ? AND w.source = 'coined'
+            ORDER BY s.composite DESC
+            """,
+            (qversion,),
+        ).fetchall()
+        stale = [r["word"] for r in rows if row_prompt(r["raw"]) != current]
+        todo = stale[:top_n]
+        path = db.backup_database(conn) if todo and backup else None
+
+    print(f"\n[rescore] prompt {current}  model={model}")
+    print(f"[rescore] {len(rows) - len(stale)} of {len(rows)} coined names already on this prompt; "
+          f"re-scoring the best {len(todo)} of {len(stale)} older ones")
+    if path:
+        print(f"[rescore] backup: {path}")
+    if not todo:
+        return
+
+    chunk = min(20, max(6, math.ceil(len(todo) / concurrency)))
+    try:
+        with console.RichBar("Re-scoring", total=len(todo)) as pbar:
+            done = asyncio.run(score_words_openrouter(
+                todo, qversion, model, db_path=db_path, pbar=pbar, api_url=api_url, api_key=api_key,
+                batch_size=chunk, concurrency=concurrency, mode="brand",
+            ))
+        print(f"[rescore] re-scored {done} of {len(todo)} names; "
+              f"{len(stale) - done} older names remain (rerun to continue down the list)")
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        print("\n[rescore] paused (Ctrl+C). Progress is saved; rerun to continue.")
+
+    if budget.calls():
+        print(budget.summary())
+    print("[rescore] see the new ranking with `namefinder top`")

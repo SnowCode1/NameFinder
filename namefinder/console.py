@@ -395,7 +395,46 @@ class CostColumn(ProgressColumn):
         from . import budget
         text = budget.metrics_text()
         style = "bold red" if budget.exhausted() else "green"
-        return Text(text, style=style)
+        return Text(text, style=style, no_wrap=True, overflow="ellipsis")
+
+
+class RichBar:
+    """A one-task rich progress bar with the small tqdm surface the pipeline uses.
+
+    `update(n)` advances, `set_postfix_str` is accepted and ignored (the cost column
+    re-renders spend itself), and `note(text)` sets a live status after the bar.
+    Prints made while it is open appear above the bar.
+    """
+
+    def __init__(self, description: str, total: int, unit: str = "word", style: str = "cyan"):
+        self.progress = Progress(
+            SpinnerColumn(style=f"bold {style}"),
+            TextColumn(f"[bold {style}]{{task.description}}"),
+            BarColumn(bar_width=32, complete_style=style, finished_style=f"bold {style}"),
+            MofNCompleteColumn(),
+            TextColumn(f"[dim]{unit}s[/]"),
+            TimeRemainingColumn(),
+            TextColumn("{task.fields[note]}"),
+            CostColumn(),
+            console=_console,
+        )
+        self.task_id = self.progress.add_task(description, total=total, note="")
+
+    def update(self, n: int = 1) -> None:
+        self.progress.advance(self.task_id, n)
+
+    def set_postfix_str(self, *_args, **_kwargs) -> None:
+        pass
+
+    def note(self, text: str) -> None:
+        self.progress.update(self.task_id, note=text)
+
+    def __enter__(self) -> "RichBar":
+        self.progress.start()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.progress.stop()
 
 
 class LiveScoringDashboard:

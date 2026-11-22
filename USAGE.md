@@ -129,7 +129,13 @@ namefinder coin --no-domains --no-score --limit 50
 
 Each candidate comes from one of five engines (prefix, suffix, truncation, portmanteau, vowel shift) applied to a base word sampled by rank. Portmanteaus fuse two words at vowel/consonant seams, so both parents are shortened (each keeps at least 40% of its letters) and the join alternates sounds. Every candidate passes one quality gate before it is stored or scored: pronounceability (`phonetics.py`, floor `COIN_MIN_PHONETIC`), no real English words, no crude fragments (`COIN_BLOCK_SUBSTRINGS`), and not already in the database.
 
+**Near-duplicates.** A candidate one letter away from an existing coined name (one letter added, removed or changed: `origagrapf` vs `origagraph`) is also dropped. The exception is when that neighbour scored in the top 5% of coined names, so variations on winners are still explored while respellings of weak names stop costing scoring calls. The LLM engine is shown its recently dropped near-copies and told to vary the idea, not a single letter. It also adjusts how many names it requests to the share that actually passes. When the rule engines come up short, the LLM fills the gap. Tune it with `COIN_NEAR_DUP` / `COIN_NEAR_DUP_KEEP_QUANTILE` in `config.py`. Before this filter, about half of a day's coined names were such respellings.
+
 **Brevity and recomputing.** Brand composites carry a syllable penalty (`SYLLABLE_PENALTY` in `config.py`: 4% off for 3 syllables, 10% for 4+). After changing any weight or penalty in `config.py`, run `namefinder recompute` to re-derive every coined word's composite from its stored sub-scores. It makes no LLM calls and backs up the DB first (`--no-backup` to skip). Words with no verbable rating are treated as 0.5, so the first recompute also lowers unrated words by 4%.
+
+**Re-scoring after a prompt change.** Every brand score records a fingerprint of the scoring prompts it was made with. After editing `prompts/system_prompt.md` or `prompts/user_prompt.md`, run `namefinder rescore` to re-score the best 10,000 coined names still on an older prompt (`--top-n` to change, `--max-cost` to cap spend; roughly $0.10 per 1,000 names on the default model). Rows are overwritten in place and the DB is backed up first. A rerun skips names already current and continues down the list. Re-scored names lose their refine flag, so run `namefinder refine` afterwards. Brand scoring never stores a word the model returned without scores; such words stay unscored until the next `score --mode brand`.
+
+**The product brief.** `prompts/product.md` (private; falls back to `prompts/product.example.md`) describes the product in a few lines. The refine pass and the built-in LLM coin prompt include it, so edit it when the product or its voice changes. The scoring, root, coin and final prompts each carry their own fuller description; keep them consistent with it.
 
 **Steering toward verbs.** Names that work as "I just ___ it" are favoured three ways, all tunable in `config.py` (`COIN_VERB_*`, `COIN_LEARN_VERB`): (1) a free `phonetics.verb_score` (short, hard-consonant ending, clean -ed/-ing) softly biases every engine, so unlikely verbs are kept less often but never banned, and also helps pick among splice options; (2) parents whose common -ing/-ed forms exist in wordfreq (trace, link, focus) are picked up to twice as often; (3) engine and partner learning now weights each composite by how verb-like the LLM rated the name.
 
@@ -147,7 +153,10 @@ Some bases produce far better names than others. A base's value is its **tail ra
 namefinder bases                          # top 30 bases by tail rate
 namefinder bases --sort recent -n 50      # by rate over each base's last 150 names
 namefinder bases --sort best --min-names 50
+namefinder bases --spoken                 # only names the LLM spelled out (what the coin loop ranks on)
 ```
+
+The coin loop's bandit judges bases only on names with a spoken review (`BASE_SPOKEN_ONLY`). Older names scored without one are more lenient, so mixing them in would favour bases that were coined heavily before the review existed. Until 500 such names exist (`BASE_SPOKEN_MIN_NAMES`), the loop falls back to all names, and the `[learn] bases favoured (...)` line says which set it used.
 
 The `recent` column is red when a base's last 150 names hit well below its all-time rate (it is running dry) and green when it is improving.
 
@@ -207,6 +216,7 @@ namefinder rank-final --refresh
 | `--top-bases N` | `coin` | Number of base words to sample across vocabulary (default: `25`) |
 | `--bases WORD1,WORD2` | `coin` | Explicit root words to coin from; with `--continuous`, focus the loop on them |
 | `--sort KEY` / `--min-names N` | `bases` | Sort by `rate` (default), `recent`, `best`, `names` or `hits`; hide bases with fewer names |
+| `--spoken` | `bases` | Count only names with an LLM pronunciation review; the hit threshold is taken from those names too |
 | `--min-len N` / `--max-len N` | `coin` | Character length constraints for coined words (default: 5–10) |
 | `--no-domains` | `coin` | Skip automatic RDAP domain checks |
 | `--no-score` | `coin` | Skip automatic LLM brand scoring |
@@ -214,8 +224,9 @@ namefinder rank-final --refresh
 | `--free-domains` | `top` | Filter display to candidates with at least one free domain |
 | `--all-free` | `top` | Only candidates whose every checked domain is free (words with no domain check are excluded) |
 | `--clean` | `top` | Filter display to candidates clear of trademark conflicts |
+| `--spoken` | `top` | Only names with an LLM pronunciation review (spelled out by brand scoring or `refine`); hides older rows judged by code-side phonetics alone |
 | `--bases-only` | `top` | Hide coined names; show dictionary base words only |
-| `--since AGE` | `top` | Mark names scored within the window with a yellow `NEW` and names refined within it with a cyan `REF` (e.g. `90m`, `6h`, `2d`; default `24h`; `0` turns marks off). Names refined before this feature existed carry no timestamp, so they are never marked `REF` |
+| `--since AGE` | `top` | Mark names scored within the window with a yellow `NEW` and names refined within it with a cyan `REF` (units `s`, `m`, `h`, `d`, `w`, combinable and spellable in full: `30s`, `10m`, `1h30m`, `6h`, `2d`, `1w`, `"2 days"`; a bare number is minutes; `all` marks everything; default `10m` (`TOP_SINCE` in `config.py`); `0`/`off` turns marks off). Names refined before this feature existed carry no timestamp, so they are never marked `REF` |
 | `--new` | `top` | Show only names marked `NEW` or `REF`; combine with `-n` and the other filters |
 | `--batch N` / `--domain-top F` / `--concurrency N` | `coin` | Continuous mode: coined words per cycle (default 120), fraction of each cycle's best scores that get a domain check (default 0.25; `1.0` = all), parallel scoring and LLM-coining requests (default 20; rate limits back off automatically) |
 | `--max-cost USD` | `score`, `coin`, `refine` | Stop sending paid requests once this much is spent in the command (default `$1.00`, env `NAMEFINDER_MAX_COST`; `0` = no limit). In-flight requests finish, so spend can overshoot slightly; progress is saved and a rerun continues |
@@ -227,9 +238,19 @@ namefinder rank-final --refresh
 
 ---
 
-## Spoken-Name Review (`namefinder refine`)
+## Spoken-Name Review and Ranking Stabilisation (`namefinder refine`)
 
-Pass 1 (`score` / `coin`) ranks everything cheaply. Pass 2 reviews only the best coined words: the model splits each word into syllables, respells it, writes how a listener would spell it after hearing it once, and lists embarrassing sound-alikes. Each word is reviewed several times and the answers are averaged, then blended with the code-side checks in `namefinder/phonetics.py`.
+**Pass 1 (`coin` and `score --mode brand`) spells every name out.** Before any score, the model writes the syllables, a say-aloud respelling with stress (`LOOM-trays`), how a listener would spell it after hearing it once, and its sound-alikes. Then it rates `sayable`, `ambiguity` and `mishear_risk`. `score.spoken_review` blends those with the code-side checks in `namefinder/phonetics.py`:
+
+- **Phonetic score:** half the code-side score, half `sayable * (1 - 0.5 * ambiguity)`. This feeds the pronounceability gate.
+- **Heard spelling:** if the heard spelling differs from the word, ambiguity is at least 0.4.
+- **Sound-alikes:** a damaging sound-alike raises `neg`, so `seenly` heard as "seemly" loses points.
+
+The questions are added in code, so private prompt files need no edits. If a private `user_prompt.md` already asks for `"say_aloud"`, nothing is appended.
+
+**Pass 2 (`refine`) stabilises the top of the table.** A single pass-1 answer is noisy, and the top of a large pool is mostly the luckiest samples. Refine asks the same spoken-name questions several more times for only the best coined words, at varied temperatures. It averages those answers together with the pass-1 answer and writes the result back.
+
+Names scored before pass 1 spelled words out keep their old, code-side-only phonetic score, which is more lenient. Run `refine` over the top few hundred to put them on the same footing as new names.
 
 ```powershell
 namefinder coin --continuous --backend local     # pass 1 (builds the pool)

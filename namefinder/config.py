@@ -89,15 +89,12 @@ def secret(name: str) -> str | None:
 
 # --- product context (shared Jev state, per the TypeSafe skill) ------------
 PRODUCT_NAME = "the product"
-PRODUCT_BLURB = (
-    "A software verification tool: a high-speed image provenance engine with an LLM agent. "
-    "It helps a person find where a picture came from and trace how it spread. "
-    "The feel is a grounded, calm, trustworthy utility - a quiet professional tool, "
-    "like Goose, Obsidian, Linear, or Raycast, with no hype. "
-    "Names do not need to literally mean 'search' or 'image'; evocative metaphors, physical anchors, "
-    "instruments, or natural concepts (e.g. Prism, Atlas, Beacon, Fathom, Loom, Anchor, Canvas, Vector, Hearth) "
-    "that project dignity, depth, clarity, and steady utility are highly desirable."
+# The real product brief is private: prompts/product.md (gitignored), else product.example.md.
+DEFAULT_PRODUCT_BLURB = (
+    "A software verification tool: a record of where an image first appeared and every copy and edit since. "
+    "The voice is technical and plain, with no hype; names should sound like a sober technical term."
 )
+PRODUCT_BLURB = load_prompt("product.md", DEFAULT_PRODUCT_BLURB)
 
 
 # --- stage 1: wordlist -----------------------------------------------------
@@ -169,7 +166,9 @@ GENERIC_PREFIX_PENALTY = {   # prefix -> composite multiplier reduction
 SYLLABLE_PENALTY = {3: 0.04, 4: 0.10}
 # Refine pass (second pass over the top coined words)
 REFINE_MODEL = os.getenv("OPENROUTER_REFINE_MODEL") or SCORE_MODEL
+TOP_SINCE = "10m"       # `top --since` default: window for NEW/REF marks
 REFINE_TOP_N = 100
+RESCORE_TOP_N = 10000   # `rescore`: top coined names brought up to the current brand prompt
 REFINE_SAMPLES = 3
 
 
@@ -225,7 +224,9 @@ COIN_LLM_PARENTS_PER_REQUEST = 6
 COIN_LLM_FOCUS_PER_NAME_COUNT = 16  # names requested per parent when the loop is focused on a few roots
 COIN_LLM_TEMPERATURE = 0.9
 COIN_LLM_FEEDBACK = 6          # best/worst earlier LLM names shown to the model as style feedback
-COIN_BATCH = 120             # coined words per continuous cycle
+COIN_NEAR_DUP = True                 # reject coined names one letter from an existing coined name...
+COIN_NEAR_DUP_KEEP_QUANTILE = 0.95   # ...unless that name scored in the top 5% (variations on winners stay)
+COIN_BATCH = 120            # coined words per continuous cycle
 
 # Base-word bandit (namefinder/bases.py): which bases tend to produce top-tier names
 BASE_BANDIT = True           # weight base sampling by each base's track record (False = rank prior only)
@@ -233,7 +234,9 @@ BASE_TAIL_QUANTILE = 0.95    # a "hit" is a coined name in the top 5% of all coi
 BASE_PRIOR = (1, 19)         # Beta prior pseudo-counts (hits, misses): prior hit rate 5%, worth 20 names
 BASE_WINDOW = 150            # bandit judges each base on its most recent N names, so exhausted bases fade
 BASE_MULT_CAP = 20.0         # largest weight multiplier a single base can draw
-BASE_RANK_FADE = 50          # names after which the rank prior keeps half its (log) influence on a base
+BASE_SPOKEN_ONLY = True      # judge bases only on names the LLM spelled out (pass-1 spoken review or refine)
+BASE_SPOKEN_MIN_NAMES = 500  # ...but use all names until this many spoken-reviewed names with a base exist
+BASE_RANK_FADE = 50         # names after which the rank prior keeps half its (log) influence on a base
 COIN_CONCURRENCY = 20        # parallel scoring / LLM-coining requests per cycle (429s back off automatically)
 COIN_DOMAIN_TOP = 0.25       # fraction of each cycle (best scores) that gets a domain check
 DOMAIN_STALE_DAYS = 7

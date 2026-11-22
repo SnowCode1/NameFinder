@@ -173,7 +173,7 @@ def write_reports(rows: list[dict[str, Any]], db_path=None) -> tuple[str, str]:
         "",
         f"Generated {_now()} by NameFinder.",
         "",
-        "Product: high-speed image provenance engine + LLM agent for finding where a picture came from and tracing how it spread.",
+        "Product: " + config.PRODUCT_BLURB.splitlines()[0],
         "",
         f"- Words screened end to end: {len(enriched)}",
         f"- OpenRouter model: `{rows[0].get('model', config.OPENROUTER_MODEL) if rows else config.OPENROUTER_MODEL}`",

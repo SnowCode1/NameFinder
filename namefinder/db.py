@@ -468,13 +468,20 @@ def get_candidates_summary(
     only_clean_trademarks: bool = False,
     bases_only: bool = False,
     all_domains_free: bool = False,
+    spoken_only: bool = False,
 ) -> list[dict[str, Any]]:
-    """Return enriched rows for CLI inspection."""
+    """Return enriched rows for CLI inspection.
+
+    `spoken_only` keeps names the LLM has spelled out (a say-aloud respelling from brand
+    scoring or refine), dropping older rows judged by the code-side phonetics alone.
+    """
     base_rows = ranked_words(conn, qversion, limit=None, dict_only=bases_only)
     out: list[dict[str, Any]] = []
 
     for r in base_rows:
         word = r["word"]
+        if spoken_only and not (r["say_aloud"] or r["refined"]):
+            continue
         # Domains check
         dom_rows = conn.execute(
             "SELECT tld, status FROM active_domains WHERE word = ? ORDER BY tld", (word,)

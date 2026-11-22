@@ -133,7 +133,7 @@ Scoring Examples:
 
     p_ref = sub.add_parser(
         "refine",
-        help="pass 2: spoken-name review (syllables, say-aloud, mishearing) of the top coined words",
+        help="pass 2: stabilise the top coined words by re-sampling the spoken-name review and averaging",
     )
     _add_common(p_ref)
     p_ref.add_argument("--top-n", type=int, default=config.REFINE_TOP_N,
@@ -163,11 +163,15 @@ Scoring Examples:
                        help="show only candidates whose every checked domain is free (unchecked words excluded)")
     p_top.add_argument("--clean", action="store_true",
                        help="show only candidates clear of trademark conflicts")
+    p_top.add_argument("--spoken", action="store_true",
+                       help="show only names with an LLM pronunciation review (spelled out in scoring or refine)")
     p_top.add_argument("--bases-only", action="store_true",
                        help="show only dictionary base words (exclude coined names)")
-    p_top.add_argument("--since", default="24h", metavar="AGE",
-                       help="mark names scored (NEW) or refined (REF) within this window, e.g. 90m, 6h, 2d "
-                            "(default: 24h; 0 turns marking off)")
+    p_top.add_argument("--since", default=config.TOP_SINCE, metavar="AGE",
+                       help="mark names scored (NEW) or refined (REF) within this window: s, m, h, d or w units, "
+                            "combinable and spellable in full (30s, 10m, 1h30m, 6h, 2d, 1w, '2 days'); a bare "
+                            "number is minutes; 'all' marks everything, 0/off turns marking off "
+                            "(default: %(default)s)")
     p_top.add_argument("--new", dest="new_only", action="store_true",
                        help="show only names marked NEW or REF within the --since window")
 
@@ -183,6 +187,9 @@ Scoring Examples:
                               "name count or hit count")
     p_bases.add_argument("--min-names", type=int, default=0,
                          help="hide bases with fewer scored coined names than this")
+    p_bases.add_argument("--spoken", action="store_true",
+                         help="count only names with an LLM pronunciation review (what the coin loop uses "
+                              "when BASE_SPOKEN_ONLY is on)")
 
     p_coin = sub.add_parser(
         "coin",
@@ -242,21 +249,57 @@ Coining Examples:
     _add_common(p_rc)
     p_rc.add_argument("--no-backup", action="store_true", help="skip the database backup before updating")
 
+    p_rs = sub.add_parser(
+        "rescore",
+        help="re-score the top coined names with the current brand prompt (after editing prompts; resumable)",
+    )
+    _add_common(p_rs)
+    p_rs.add_argument("--top-n", type=int, default=config.RESCORE_TOP_N,
+                      help="re-score this many of the best names still on an older prompt; rerun to continue "
+                           "down the list (default: %(default)s)")
+    p_rs.add_argument("--backend", choices=["openrouter", "local", "lmstudio"], default=None)
+    p_rs.add_argument("--model", default=None, help="model id override (default: the scoring model)")
+    p_rs.add_argument("--concurrency", type=int, default=config.COIN_CONCURRENCY,
+                      help="parallel requests (default: %(default)s)")
+    p_rs.add_argument("--max-cost", type=float, default=None, help=_MAX_COST_HELP)
+    p_rs.add_argument("--no-backup", action="store_true", help="skip the database backup before re-scoring")
+
     p6 = sub.add_parser("status", help="show pipeline cache counts and funnel summary")
     _add_common(p6)
 
     return ap
 
 
+_AGE_UNITS = {
+    "s": "seconds", "sec": "seconds", "secs": "seconds", "second": "seconds", "seconds": "seconds",
+    "m": "minutes", "min": "minutes", "mins": "minutes", "minute": "minutes", "minutes": "minutes",
+    "h": "hours", "hr": "hours", "hrs": "hours", "hour": "hours", "hours": "hours",
+    "d": "days", "day": "days", "days": "days",
+    "w": "weeks", "wk": "weeks", "wks": "weeks", "week": "weeks", "weeks": "weeks",
+}
+_AGE_PART = re.compile(r"(\d+(?:\.\d+)?)\s*([a-z]*)")
+
+
 def _parse_age(text: str) -> timedelta | None:
-    """'90m' / '6h' / '2d' -> timedelta; '0' or empty -> None (marking off)."""
-    m = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*([mhd]?)\s*", str(text or "0"))
-    if not m:
-        raise SystemExit(f"--since: expected a number with m, h or d (e.g. 90m, 6h, 2d), got {text!r}")
-    value, unit = float(m.group(1)), m.group(2) or "h"
-    if value == 0:
+    """'30s', '10m', '6h', '2d', '1w', '1h30m', '2 days', 'all' -> timedelta; '0' / 'off' -> None.
+
+    A bare number means minutes. 'all' covers every row (marks everything scored).
+    """
+    raw = str(text or "0").strip().lower()
+    if raw in ("0", "off", "none", "no"):
         return None
-    return timedelta(**{{"m": "minutes", "h": "hours", "d": "days"}[unit]: value})
+    if raw in ("all", "ever", "forever"):
+        return timedelta(days=365 * 100)
+    compact = raw.replace(" ", "")
+    parts = _AGE_PART.findall(compact)
+    if not parts or "".join(n + u for n, u in parts) != compact or any(u and u not in _AGE_UNITS for _, u in parts):
+        raise SystemExit(
+            f"--since: expected an age like 30s, 10m, 6h, 2d, 1w or 1h30m (or 0/off, all), got {text!r}"
+        )
+    total = timedelta()
+    for num, unit in parts:
+        total += timedelta(**{_AGE_UNITS[unit or "m"]: float(num)})
+    return total or None
 
 
 def _mark_fresh(items: list[dict], window: timedelta | None) -> None:
@@ -274,7 +317,7 @@ def _mark_fresh(items: list[dict], window: timedelta | None) -> None:
 
 def cmd_top(db_path, limit: int = 25, only_free: bool = False, only_clean: bool = False,
             bases_only: bool = False, all_free: bool = False,
-            since: str = "24h", new_only: bool = False) -> None:
+            since: str = config.TOP_SINCE, new_only: bool = False, spoken_only: bool = False) -> None:
     window = _parse_age(since)
     if new_only and not window:
         raise SystemExit("--new needs a non-zero --since window")
@@ -286,12 +329,13 @@ def cmd_top(db_path, limit: int = 25, only_free: bool = False, only_clean: bool 
             only_clean_trademarks=only_clean,
             bases_only=bases_only,
             all_domains_free=all_free,
+            spoken_only=spoken_only,
         )
         _mark_fresh(items, window)
-        n_new = sum(1 for it in items[:limit] if it["fresh"] == "new")
-        n_ref = sum(1 for it in items[:limit] if it["fresh"] == "refined")
         if new_only:
             items = [it for it in items if it["fresh"]][:limit]
+        n_new = sum(1 for it in items[:limit] if it["fresh"] == "new")
+        n_ref = sum(1 for it in items[:limit] if it["fresh"] == "refined")
 
         filter_desc = []
         if bases_only:
@@ -302,6 +346,8 @@ def cmd_top(db_path, limit: int = 25, only_free: bool = False, only_clean: bool 
             filter_desc.append("free domains only")
         if only_clean:
             filter_desc.append("clean trademarks only")
+        if spoken_only:
+            filter_desc.append("pronunciation-reviewed only")
         filters_str = f" ({', '.join(filter_desc)})" if filter_desc else ""
 
         legend = "✓ = refined"
@@ -322,10 +368,10 @@ def cmd_top(db_path, limit: int = 25, only_free: bool = False, only_clean: bool 
         )
 
 
-def cmd_bases(db_path, limit: int = 30, sort: str = "rate", min_names: int = 0) -> None:
+def cmd_bases(db_path, limit: int = 30, sort: str = "rate", min_names: int = 0, spoken_only: bool = False) -> None:
     from . import bases
     with db.session(db_path) as conn:
-        stats, thr = bases.base_stats(conn, config.QUESTION_VERSION)
+        stats, thr = bases.base_stats(conn, config.QUESTION_VERSION, spoken_only=spoken_only)
     rows = [s for s in stats.values() if s.n >= min_names]
     if not rows:
         print(f"\n{console.yellow('No scored coined names with a recorded base yet.')}\n")
@@ -339,7 +385,8 @@ def cmd_bases(db_path, limit: int = 30, sort: str = "rate", min_names: int = 0) 
     top_pct = round((1 - config.BASE_TAIL_QUANTILE) * 100)
     console.print_base_table(
         rows[:limit], thr,
-        title=f"Base value: {len(rows)} bases, a hit = top {top_pct}% of coined names "
+        title=f"Base value{' (pronunciation-reviewed names only)' if spoken_only else ''}: "
+              f"{len(rows)} bases, a hit = top {top_pct}% of coined names "
               f"(rate = (hits+{a})/(names+{a + b}); recent = last {config.BASE_WINDOW} names, red = running dry)",
     )
 
@@ -389,7 +436,7 @@ def cmd_status(db_path) -> None:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
-    if args.cmd in ("score", "score-jev", "refine", "coin"):
+    if args.cmd in ("score", "score-jev", "refine", "coin", "rescore"):
         budget.reset(getattr(args, "max_cost", None))
 
     try:
@@ -427,9 +474,10 @@ def main(argv: list[str] | None = None) -> int:
         elif args.cmd == "top":
             cmd_top(args.db, limit=args.top_count, only_free=args.free_domains, only_clean=args.clean,
                     bases_only=args.bases_only, all_free=args.all_free,
-                    since=args.since, new_only=args.new_only)
+                    since=args.since, new_only=args.new_only, spoken_only=args.spoken)
         elif args.cmd == "bases":
-            cmd_bases(args.db, limit=args.top_count, sort=args.sort, min_names=args.min_names)
+            cmd_bases(args.db, limit=args.top_count, sort=args.sort, min_names=args.min_names,
+                      spoken_only=args.spoken)
         elif args.cmd == "coin":
             from . import coin
             bases_list = [b.strip() for b in args.bases.split(",")] if args.bases else None
@@ -458,6 +506,10 @@ def main(argv: list[str] | None = None) -> int:
             print(f"[recompute] {total} coined words checked, {changed} composites updated")
             if path:
                 print(f"[recompute] backup: {path}")
+        elif args.cmd == "rescore":
+            from . import score as score_mod
+            score_mod.rescore_run(top_n=args.top_n, model=args.model, backend=args.backend,
+                                  concurrency=args.concurrency, db_path=args.db, backup=not args.no_backup)
         elif args.cmd == "status":
             cmd_status(args.db)
         return 0

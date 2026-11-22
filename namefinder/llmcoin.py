@@ -23,7 +23,7 @@ from typing import Any, Sequence
 
 from tqdm import tqdm
 
-from . import budget, coin, config, db, net, score
+from . import budget, coin, config, console, db, net, score
 
 DEFAULT_COIN_PROMPT = (
     "You are a brand-naming linguist inventing names for a software product.\n"
@@ -46,6 +46,8 @@ DEFAULT_COIN_PROMPT = (
 STYLE_ANCHORS = "ping, grep, zoom, slack, figma, notion, vercel, sentry"
 
 _RECENT_REJECTS: deque[str] = deque(maxlen=24)
+_RECENT_NEAR: deque[str] = deque(maxlen=16)   # dropped as one-letter variants of weaker existing names
+_SURVIVAL = [0.4, 0.4]   # share of raw proposals that pass gate + dedupe: [focused runs, broad runs]
 
 
 def _first_parent(parents: str | None) -> str:
@@ -103,6 +105,7 @@ def build_user_prompt(
     parents: Sequence[str], per_parent: int, min_len: int, max_len: int,
     best: Sequence[str], worst: Sequence[str], rejected: Sequence[str],
     existing: dict[str, list[str]] | None = None,
+    near: Sequence[str] = (),
 ) -> str:
     lines = [
         f"Parents: {', '.join(parents)}",
@@ -125,6 +128,11 @@ def build_user_prompt(
         lines.append(
             "Names our filters rejected recently, usually for being real words, hard to pronounce or crude: "
             + ", ".join(rejected) + "."
+        )
+    if near:
+        lines.append(
+            "Recently dropped as one-letter respellings of names we already have (vary the idea or the "
+            "structure, not a single letter): " + ", ".join(near) + "."
         )
     lines += [
         "",
@@ -187,15 +195,20 @@ async def _propose(
     best: Sequence[str], worst: Sequence[str], rejected: Sequence[str],
     temperature: float, concurrency: int,
     existing: dict[str, list[str]] | None = None,
+    near: Sequence[str] = (),
+    bar: Any = None,
 ) -> list[tuple[str, str]]:
-    """Run the proposal requests concurrently. Returns raw (name, parent) pairs."""
+    """Run the proposal requests concurrently. Returns raw (name, parent) pairs.
+
+    `bar` (console.RichBar) advances once per finished request and notes the names received.
+    """
     headers = {"Authorization": f"Bearer {key or 'local'}", "Content-Type": "application/json"}
     sem = asyncio.Semaphore(max(1, concurrency))
     out: list[tuple[str, str]] = []
 
     async with net.async_client(timeout=120.0) as http:
         async def one(chunk: list[str]) -> None:
-            user = build_user_prompt(chunk, per_parent, min_len, max_len, best, worst, rejected, existing)
+            user = build_user_prompt(chunk, per_parent, min_len, max_len, best, worst, rejected, existing, near)
             async with sem:
                 parsed = await _ask(http, url, headers, model, system, user, temperature)
             for item in parsed or []:
@@ -209,6 +222,9 @@ async def _propose(
                     w = _clean(n)
                     if w:
                         out.append((w, parent))
+            if bar:
+                bar.update(1)
+                bar.note(f"[magenta]{len(out)} names[/]")
 
         await asyncio.gather(*(one(c) for c in chunks))
     return out
@@ -250,8 +266,9 @@ def llm_batch(
 
     weights = coin.parent_weights(ranked_words, half_life, bandit)
     words = [r["word"] if hasattr(r, "keys") else str(r) for r in ranked_words]
-    # ~40% of raw proposals survive the gate and dedupe; over-ask a little
-    n_parents = max(2, math.ceil(count * 1.3 / (per_parent * 0.4)))
+    # over-ask by the share of raw proposals that recently survived the gate and dedupe
+    survive = _SURVIVAL[0] if focus else _SURVIVAL[1]
+    n_parents = max(2, math.ceil(count * 1.3 / (per_parent * survive)))
     size = max(1, config.COIN_LLM_PARENTS_PER_REQUEST)
     if focus:
         # a handful of roots must still fill the whole quota: ask repeatedly, each request one chunk
@@ -260,8 +277,8 @@ def llm_batch(
         pool = list(focus)
         per_parent = max(per_parent, config.COIN_LLM_FOCUS_PER_NAME_COUNT)
         per_chunk = min(size, len(pool))
-        # each request yields per_chunk * per_parent raw names, ~40% of which survive the gate
-        n_requests = max(1, math.ceil(count * 1.3 / (per_chunk * per_parent * 0.4)))
+        # each request yields per_chunk * per_parent raw names, `survive` of which pass the gate
+        n_requests = max(1, math.ceil(count * 1.3 / (per_chunk * per_parent * survive)))
         pool_w = [bandit.factor(p) for p in pool] if bandit else [1.0] * len(pool)
         for _ in range(n_requests):
             chunks.append(_weighted_sample(pool, pool_w, per_chunk))
@@ -277,14 +294,21 @@ def llm_batch(
     qv = config.QUESTION_VERSION
     with db.session(db_path) as conn:
         known = {r[0] for r in conn.execute("SELECT word FROM words")}
+        near = coin.NearIndex.load(conn, qv)
         best, worst = feedback_examples(conn, qv, config.COIN_LLM_FEEDBACK, focus=focus)
         existing = parent_best(conn, qv, sorted({p for c in chunks for p in c})) if focus else None
 
-    raw = asyncio.run(_propose(
-        chunks, url, key, model, system, per_parent, min_len, max_len,
-        best, worst, list(_RECENT_REJECTS), config.COIN_LLM_TEMPERATURE, concurrency, existing,
-    ))
+    with console.RichBar(f"LLM coining ({model.split('/')[-1]})", total=len(chunks),
+                         unit="request", style="magenta") as bar:
+        raw = asyncio.run(_propose(
+            chunks, url, key, model, system, per_parent, min_len, max_len,
+            best, worst, list(_RECENT_REJECTS), config.COIN_LLM_TEMPERATURE, concurrency, existing,
+            list(_RECENT_NEAR), bar,
+        ))
 
+    # shuffle first so the near-duplicate check does not always favour the first request's names
+    raw = list(raw)
+    random.shuffle(raw)
     accepted: dict[str, str] = {}
     for w, parent in raw:
         if w in known or w in accepted or w == parent:
@@ -293,13 +317,20 @@ def llm_batch(
             if w not in _RECENT_REJECTS:
                 _RECENT_REJECTS.append(w)
             continue
+        if not near.admit(w):
+            if w not in _RECENT_NEAR:
+                _RECENT_NEAR.append(w)
+            continue
         accepted[w] = parent
 
-    pairs = list(accepted.items())
-    random.shuffle(pairs)
-    pairs = pairs[:count]
-    if focus:
-        print(f"[llm-coin] {len(chunks)} requests, {len(raw)} raw names, {len(accepted)} passed gate+dedupe")
+    if raw:
+        # moving estimate of the survival rate, kept apart for focused and broad runs
+        slot = 0 if focus else 1
+        rate = len(accepted) / len(raw)
+        _SURVIVAL[slot] = min(0.8, max(0.08, 0.6 * _SURVIVAL[slot] + 0.4 * rate))
+    pairs = list(accepted.items())[:count]
+    print(f"[llm-coin] {len(chunks)} requests, {len(raw)} raw names, {near.dropped} near-duplicates dropped, "
+          f"{len(accepted)} passed gate+dedupe")
     if not pairs:
         return []
 

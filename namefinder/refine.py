@@ -1,11 +1,12 @@
-"""Pass 2: spoken-name review of the top coined candidates.
+"""Pass 2: stabilise the rankings of the top coined candidates.
 
-Pass 1 (`score`) is cheap and ranks everything. This pass takes only the best
-coined words and makes the model work through how each one is *said*: split it
-into syllables, respell it, write down what a listener would type after hearing
-it once, and name any embarrassing sound-alikes. Numeric answers are sampled
-several times and averaged, then blended with the deterministic checks in
-`phonetics.py` and written back onto the same score row.
+Pass 1 (`score --mode brand`, and the coin loop) already makes the model spell
+out how every name is said (syllables, respelling, heard spelling, sound-alikes)
+and folds that into the composite. That is one sample at one temperature, so the
+top of the table is noisy. This pass re-asks the same spoken-name questions
+several times for only the best words, averages those samples together with the
+pass-1 answer, blends the result with the deterministic checks through
+`score.spoken_review`, and writes it back onto the same score row.
 """
 
 from __future__ import annotations
@@ -20,7 +21,7 @@ from typing import Any
 
 from tqdm import tqdm
 
-from . import budget, config, console, db, net, phonetics, score
+from . import budget, config, console, db, net, score
 
 DEFAULT_REFINE_PROMPT = (
     "You are a phonetics-aware brand naming reviewer for a software product.\n"
@@ -141,20 +142,24 @@ def merge_samples(samples: list[dict[str, Any]]) -> dict[str, Any]:
     return merged
 
 
+def pass1_sample(old: dict[str, Any]) -> dict[str, Any] | None:
+    """The spoken review stored by brand scoring, usable as one more sample (None for older rows)."""
+    try:
+        item = (json.loads(old.get("raw") or "{}") or {}).get("openrouter") or {}
+    except (TypeError, ValueError):
+        return None
+    return item if isinstance(item, dict) and "sayable" in item else None
+
+
 def build_row(conn, old: dict[str, Any], m: dict[str, Any], model: str = "") -> dict[str, Any]:
     """Combine pass-1 fields, the merged LLM review and the deterministic checks."""
     word = old["word"]
-    det = phonetics.analyze(word)
-
-    ambiguity_llm = m.get("ambiguity", det.ambiguity)
-    sayable = m.get("sayable", det.score)
-    llm_phonetic = sayable * (1.0 - 0.5 * ambiguity_llm)
-    phonetic = round(0.5 * det.score + 0.5 * llm_phonetic, 4)
-    ambiguity = round(0.5 * det.ambiguity + 0.5 * ambiguity_llm, 4)
+    sp = score.spoken_review(word, m)
+    phonetic, ambiguity = sp["phonetic"], sp["ambiguity"]
 
     spellable = m.get("spellable", old["spellable"])
     natural = m.get("natural", old["natural"])
-    neg = max(m.get("neg", old["neg"]), m.get("mishear_risk", 0.0))
+    neg = max(m.get("neg", old["neg"]), sp["mishear_risk"])
 
     verbable = m.get("verbable", old.get("verbable"))
     comp = score.composite_brand(
@@ -180,9 +185,9 @@ def build_row(conn, old: dict[str, Any], m: dict[str, Any], model: str = "") -> 
         "verbable": None if verbable is None else round(verbable, 4),
         "why_not": (why_not or None) and why_not[:450],
         "raw": json.dumps(raw, default=str)[:20000],
-        "syllables": m.get("syllables") or det.split,
-        "say_aloud": m.get("say_aloud") or None,
-        "misheard_as": m.get("misheard_as") or None,
+        "syllables": sp["syllables"],
+        "say_aloud": sp["say_aloud"],
+        "misheard_as": sp["misheard_as"],
         "ambiguity": ambiguity,
         "phonetic": phonetic,
         "refined": 1,
@@ -243,7 +248,9 @@ async def refine_words(
             ).fetchone()
             if not row:
                 continue
-            db.upsert_score(conn, build_row(conn, dict(row), merge_samples(samp), model))
+            old = dict(row)
+            first = pass1_sample(old)
+            db.upsert_score(conn, build_row(conn, old, merge_samples(samp + ([first] if first else [])), model))
             done += 1
     return done
 

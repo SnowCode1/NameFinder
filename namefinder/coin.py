@@ -18,7 +18,6 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Iterable, Sequence
 
-from tqdm import tqdm
 
 from . import budget, config, console, db, domains, phonetics, score
 
@@ -394,7 +393,8 @@ def _print_bandit(bandit, focus: Sequence[str] | None = None) -> None:
     else:
         shown = bandit.favoured(6)
     if shown:
-        print("[learn] bases favoured: " + "  ".join(f"{w} x{m:.1f}" for w, m in shown))
+        src = "spoken-reviewed names" if bandit.spoken else "all names"
+        print(f"[learn] bases favoured ({src}): " + "  ".join(f"{w} x{m:.1f}" for w, m in shown))
 
 
 def learn_weights(conn, qversion: str) -> tuple[dict[str, float], dict[str, float]]:
@@ -535,6 +535,74 @@ def sample_one_variation(
     return None
 
 
+_LETTERS = "abcdefghijklmnopqrstuvwxyz"
+
+
+def one_edit_neighbours(w: str) -> set[str]:
+    """Every string one insertion, deletion or substitution away from w."""
+    out: set[str] = set()
+    for i in range(len(w) + 1):
+        head, tail = w[:i], w[i:]
+        for ch in _LETTERS:
+            out.add(head + ch + tail)                 # insertion
+            if tail:
+                out.add(head + ch + tail[1:])         # substitution
+        if tail:
+            out.add(head + tail[1:])                  # deletion
+    out.discard(w)
+    return out
+
+
+class NearIndex:
+    """Rejects coined names one letter away from an existing coined name, unless that name is strong.
+
+    Near-copies of weak names waste a scoring call each; small variations on names in the
+    top (1 - COIN_NEAR_DUP_KEEP_QUANTILE) of coined composites are still allowed, so the
+    loop keeps exploring around its winners. Unscored names count as weak.
+    """
+
+    def __init__(self, coined: set[str], strong: set[str], enabled: bool = True):
+        self.coined = set(coined)
+        self.strong = strong
+        self.enabled = enabled
+        self.dropped = 0
+
+    @classmethod
+    def load(cls, conn, qversion: str) -> "NearIndex":
+        rows = conn.execute(
+            """
+            SELECT w.word, s.composite FROM words w
+            LEFT JOIN scores s ON s.word = w.word AND s.qversion = ?
+            WHERE w.source = 'coined'
+            """,
+            (qversion,),
+        ).fetchall()
+        comps = sorted(r["composite"] for r in rows if r["composite"] is not None)
+        strong: set[str] = set()
+        if comps:
+            q = config.COIN_NEAR_DUP_KEEP_QUANTILE
+            thr = comps[min(len(comps) - 1, int(len(comps) * q))]
+            strong = {r["word"] for r in rows if r["composite"] is not None and r["composite"] >= thr}
+        return cls({r["word"] for r in rows}, strong, config.COIN_NEAR_DUP)
+
+    def blocker(self, w: str) -> str | None:
+        """The weak neighbour that blocks w, or None if w may be kept."""
+        if not self.enabled:
+            return None
+        near = one_edit_neighbours(w) & self.coined
+        if not near or near & self.strong:
+            return None
+        return min(near)
+
+    def admit(self, w: str) -> bool:
+        """Check w and, if kept, add it so later candidates in the same batch are checked against it."""
+        if self.blocker(w):
+            self.dropped += 1
+            return False
+        self.coined.add(w)
+        return True
+
+
 def coin_stream_batch(
     ranked_words: Sequence[Any],
     batch_size: int = 15,
@@ -553,6 +621,7 @@ def coin_stream_batch(
         if learned is None:
             learned = learn_weights(conn, config.QUESTION_VERSION)
         known = {r[0] for r in conn.execute("SELECT word FROM words")}
+        near = NearIndex.load(conn, config.QUESTION_VERSION)
     engine_w, partner_w = learned
     pairs: list[tuple[str, str]] = []
     provenance: dict[str, tuple[str, str]] = {}
@@ -567,11 +636,13 @@ def coin_stream_batch(
         )
         if res:
             cand, base, engine, other = res
-            if cand not in seen and cand not in known:
+            if cand not in seen and cand not in known and near.admit(cand):
                 seen.add(cand)
                 pairs.append((cand, base))
                 provenance[cand] = (engine, f"{base},{other}" if other else base)
 
+    if near.dropped:
+        print(f"[coin] rule engines: {near.dropped} near-duplicates of weaker names dropped")
     if not pairs:
         return []
 
@@ -765,8 +836,8 @@ def run_continuous_loop(
                     db_path=db_path, learned=learned, focus=focus, bandit=bandit,
                 )
                 shortfall = batch - llm_n - len(novel_pairs)
-                if focus and shortfall > 0 and llm_share > 0:
-                    # few roots exhaust the rule engines; let the LLM fill the gap
+                if shortfall > 0 and llm_share > 0:
+                    # exhausted roots and near-duplicate drops leave the rule engines short; the LLM fills the gap
                     llm_n += shortfall
                     print(f"[coin] rule engines short by {shortfall}; asking the LLM for {llm_n}")
             if llm_n:
@@ -786,10 +857,12 @@ def run_continuous_loop(
 
             # 3. Score every new word first. Nearly all coined words have a free domain,
             #    so the domain check is a poor filter and a slow one (RDAP is rate-limited).
-            with tqdm(total=len(novel), desc=f"Cycle {cycle} scoring", unit="word", ncols=100) as pbar:
+            #    Smaller requests when that fills more of the concurrency slots (faster, smoother bar).
+            chunk = min(batch_size, max(6, math.ceil(len(novel) / max(1, concurrency))))
+            with console.RichBar(f"Cycle {cycle} scoring", total=len(novel)) as pbar:
                 asyncio.run(score.score_words_openrouter(
                     novel, qversion, model, db_path=db_path, pbar=pbar,
-                    api_url=api_url, api_key=api_key, batch_size=batch_size,
+                    api_url=api_url, api_key=api_key, batch_size=chunk,
                     concurrency=concurrency, mode="brand",
                 ))
 
@@ -945,7 +1018,7 @@ def run(
         batch_size = 8 if backend in ("local", "lmstudio") else 20
 
         print(f"\n--- Brand Scoring {len(words_to_score)} Coined Words ({backend}: {model}) ---")
-        with tqdm(total=len(words_to_score), desc="Scoring coined words", unit="word", ncols=80) as pbar:
+        with console.RichBar("Scoring coined words", total=len(words_to_score)) as pbar:
             asyncio.run(score.score_words_openrouter(
                 words_to_score, qversion, model, db_path=db_path, pbar=pbar,
                 api_url=api_url, api_key=api_key, batch_size=batch_size

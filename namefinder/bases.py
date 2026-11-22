@@ -54,15 +54,24 @@ def tail_threshold(composites: list[float], quantile: float | None = None) -> fl
     return ordered[min(len(ordered) - 1, int(len(ordered) * q))]
 
 
-def base_stats(conn, qversion: str, window: int | None = None) -> tuple[dict[str, BaseStat], float]:
-    """Per-base tail statistics over every scored coined name with a recorded base. Returns (stats, threshold)."""
+SPOKEN_CLAUSE = "AND (s.say_aloud IS NOT NULL OR s.refined = 1)"
+
+
+def base_stats(
+    conn, qversion: str, window: int | None = None, spoken_only: bool = False,
+) -> tuple[dict[str, BaseStat], float]:
+    """Per-base tail statistics over every scored coined name with a recorded base. Returns (stats, threshold).
+
+    `spoken_only` counts only names the LLM spelled out (brand scoring or refine); the tail
+    threshold is then taken from those names too, so everything is judged on one footing.
+    """
     window = config.BASE_WINDOW if window is None else window
     rows = conn.execute(
-        """
+        f"""
         SELECT w.word, w.parents, s.composite FROM words w
         JOIN scores s ON s.word = w.word AND s.qversion = ?
         WHERE w.source = 'coined' AND w.parents IS NOT NULL AND w.parents != ''
-          AND s.composite IS NOT NULL
+          AND s.composite IS NOT NULL {SPOKEN_CLAUSE if spoken_only else ""}
         ORDER BY w.created_at, w.rowid
         """,
         (qversion,),
@@ -94,6 +103,7 @@ class Bandit:
     """One cycle's Thompson draw: per-base weight multiplier and evidence count."""
     mult: dict[str, float]
     n: dict[str, int]
+    spoken: bool = False   # True when judged on spoken-reviewed names only
 
     def factor(self, word: str) -> float:
         """Multiplier for a base; untried bases draw fresh from the prior each call."""
@@ -113,10 +123,22 @@ def _draw(hits: int, n: int) -> float:
     return min(config.BASE_MULT_CAP, sample / (a / (a + b)))
 
 
-def thompson(conn, qversion: str) -> Bandit:
-    """Draw this cycle's per-base multipliers from the recent-window posteriors."""
-    stats, _ = base_stats(conn, qversion)
+def thompson(conn, qversion: str, spoken_only: bool | None = None) -> Bandit:
+    """Draw this cycle's per-base multipliers from the recent-window posteriors.
+
+    Spoken-only (default BASE_SPOKEN_ONLY) falls back to all names until at least
+    BASE_SPOKEN_MIN_NAMES spoken-reviewed names exist.
+    """
+    spoken = config.BASE_SPOKEN_ONLY if spoken_only is None else spoken_only
+    stats = None
+    if spoken:
+        stats, _ = base_stats(conn, qversion, spoken_only=True)
+        if sum(s.n for s in stats.values()) < config.BASE_SPOKEN_MIN_NAMES:
+            stats, spoken = None, False
+    if stats is None:
+        stats, _ = base_stats(conn, qversion)
     return Bandit(
         mult={b: _draw(s.recent_hits, s.recent_n) for b, s in stats.items()},
         n={b: s.n for b, s in stats.items()},
+        spoken=spoken,
     )
