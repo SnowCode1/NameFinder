@@ -69,7 +69,7 @@ def load_concept_roots(default: tuple[str, ...]) -> tuple[str, ...]:
 
 # --- secrets ---------------------------------------------------------------
 TYPESAFE_KEY_ENV = "TYPESAFE_API_KEY"
-OPENROUTER_KEY_ENV = "OPENROUTER_API_KEY"
+OPENROUTER_KEY_ENV = os.getenv("NAMEFINDER_LLM_KEY_ENV") or "OPENROUTER_API_KEY"
 MARKBASE_KEY_ENV = "MARKBASE_API_KEY"
 GITHUB_TOKEN_ENV = "GITHUB_TOKEN"
 
@@ -114,6 +114,51 @@ SUFFIX_DROP = (
     "ical", "ious", "ous", "ism", "ist", "ish", "ify", "fy", "ia", "io",
     "ly", "ies",
 )
+
+# Extra base-word layers (namefinder/lexicon.py)
+LEXICON_ZIPF_MIN = 1.5       # rarest word the jargon layers consider
+LEXICON_MIN_PHONETIC = 0.55  # pronounceability floor; lower than COIN_MIN_PHONETIC so 4-syllable words (perplexity) pass
+# Rare words with no subject-domain tag still join the jargon layer when WordNet files a noun sense under
+# one of these abstract categories and they are at least this frequent (perplexity, antecedent).
+LEXICON_ABSTRACT_LEXNAMES = ("noun.cognition", "noun.attribute", "noun.state", "noun.relation",
+                             "noun.communication", "noun.process", "noun.event", "noun.phenomenon")
+LEXICON_ABSTRACT_ZIPF_MIN = 2.0
+# Foreign layer: OMW wordnet translations of abstract English concepts into these languages
+# (OMW code -> (OMW archive folder, wordfreq code, display name)). A word must be common in its language
+# (wordfreq zipf >= LEXICON_FOREIGN_ZIPF_MIN), not an English word, and found in at least
+# LEXICON_FOREIGN_MIN_LANGUAGES of them (shared Latinate roots: fase, pausa, consulta; single-language
+# words are mostly Dutch or Icelandic oddities).
+LEXICON_LANGUAGES = {
+    "ita": ("ita", "it", "Italian"), "fra": ("fra", "fr", "French"), "spa": ("mcr", "es", "Spanish"),
+    "por": ("por", "pt", "Portuguese"), "ron": ("ron", "ro", "Romanian"), "cat": ("mcr", "ca", "Catalan"),
+    "nld": ("nld", "nl", "Dutch"), "swe": ("swe", "sv", "Swedish"), "dan": ("dan", "da", "Danish"),
+    "nob": ("nor", "nb", "Norwegian"), "isl": ("isl", "is", "Icelandic"),
+}
+LEXICON_FOREIGN_MAX_LEN = 8             # foreign roots stay short (the core wordlist's own limit)
+LEXICON_FOREIGN_ZIPF_MIN = 3.0
+LEXICON_FOREIGN_MAX_SIMILARITY = 0.8    # drop words this close in spelling to their English meaning (kontroll, strategi)
+LEXICON_FOREIGN_MIN_LANGUAGES = 2
+# English-side WordNet categories whose translations are worth considering (concepts, not animals or food)
+LEXICON_FOREIGN_LEXNAMES = (
+    "noun.cognition", "noun.communication", "noun.relation", "noun.attribute", "noun.state", "noun.process",
+    "noun.event", "noun.phenomenon", "noun.act", "noun.time", "noun.shape", "noun.group", "noun.possession",
+    "verb.cognition", "verb.communication", "verb.change", "verb.social", "verb.stative", "verb.creation",
+    "verb.possession",
+)
+LEXICON_MIN_LEN = 4
+LEXICON_MAX_LEN = 11         # core wordlist stops at 8; abstract nouns (perplexity, provenance) run longer
+# WordNet subject domains whose words never suit a software name. A word is dropped only when
+# every domain it carries is in this list ("law" or "logic" senses keep it).
+LEXICON_SKIP_DOMAINS = (
+    "sport", "baseball", "american_football", "football", "basketball", "golf", "tennis", "cricket",
+    "boxing", "fencing", "wrestling", "racing", "hunting", "fishing", "yiddish", "cooking", "music",
+    "botany", "plant", "zoology", "animal", "anatomy", "physiology", "pathology", "medicine",
+    "christianity", "heraldry", "farming", "fashion", "dance", "theater", "card_games",
+)
+
+# Every lexicon layer skips endings that make poor bases: agent nouns (-ist), qualities (-ness, -ful, -less),
+# adjective forms. The `reinstated` layer also takes nouns and verbs only (adjectives like "stylish" add nothing).
+LEXICON_DROP_ENDINGS = ("ness", "ist", "ful", "less", "able", "ible", "ish", "ious", "ally", "ize", "ise", "ian")
 
 # Hard blocklist: AI/SaaS cliches, abstract corporate filler, and words whose
 # everyday meaning is too crude or too strongly attached to another product.
@@ -218,6 +263,21 @@ COIN_BLOCK_SUBSTRINGS = (
     "nazi", "rape", "dildo", "penis", "vagina", "sexy", "nigg",
 )
 COIN_BLOCK_EDGES = ("sex",)  # blocked only at the start or end of a word
+# Wordlikeness floor (namefinder/wordlike.py): reject names less wordlike than this percentile of held-out
+# real words. A safety net against gibberish only. Measured on 67k scored names, wordlikeness does not
+# predict a top score (the most wordlike decile has about half the tail rate of the least), so it is not
+# used to bias sampling. 0 disables it.
+COIN_MIN_WORDLIKE_PCT = 0.02
+# Endings for the suffix and trunc engines, chosen by measured tail-rate lift (`namefinder engines --lift ending`):
+# -ex 3.5x, -um 2.6x, -os 2.1x, -ia 2.0x, -is 1.7x, -ix 1.6x, -us 1.3x. Dropped for lift under 1x:
+# -or, -ar, -el, -en, -ic, -an, -ax, -ox. Re-run the report and revise this list as scoring data grows.
+COIN_TWIST_PHONETIC_SLACK = 0.03        # twist: the edit may score at most this far below its winner's phonetic score
+COIN_TWIST_POOL = 300                   # twist engine: it edits names from the best N coined composites
+COIN_TRUNC_MIN_BASE = 7      # trunc only clips bases at least this long (short bases lose their meaning)
+COIN_TRUNC_MIN_CLIP = 3      # ...and keeps at least this many letters, in whole syllables (casix = cas + ix);
+                             # clips are drawn with weight length^2, so 3-letter clips are the rarest
+COIN_COMPOUND_MAX_PART = 6   # compound engine: each whole word is at most this long
+COIN_SUFFIXES = ("ex", "um", "os", "ia", "is", "ix", "us", "on", "am", "im", "x")
 # Verb-likeness steering for the coining engines
 COIN_VERB_PARENT_BOOST = 1.0   # verb-like parents are up to (1 + boost)x as likely to be picked
 COIN_VERB_FLOOR = 0.35         # a candidate with verb_score 0 is kept with this probability (1.0 = no bias)
@@ -272,8 +332,17 @@ TRADEMARK_STALE_DAYS = 30
 
 
 # --- stage 5: final tagging ------------------------------------------------
-OPENROUTER_URL = "https://openrouter.ai/api/v1"
+# Any OpenAI-compatible endpoint can replace OpenRouter for every LLM stage: set
+# NAMEFINDER_LLM_URL (e.g. https://inference-api.nousresearch.com/v1) and
+# NAMEFINDER_LLM_KEY_ENV (name of the .env variable holding that provider's key).
+# OpenRouter-only request fields (reasoning, provider routing) are sent only to openrouter.ai.
+OPENROUTER_URL = (os.getenv("NAMEFINDER_LLM_URL") or "https://openrouter.ai/api/v1").rstrip("/")
 OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL") or DEFAULT_MODEL
+# Generation stages (`ideas`, `generate`, `evolve`, LLM coining in `coin`) can use their own
+# endpoint while scoring, refine and the tournament stay on the one above:
+# NAMEFINDER_GEN_URL and NAMEFINDER_GEN_KEY_ENV (same meaning as the two settings above).
+GEN_URL = (os.getenv("NAMEFINDER_GEN_URL") or OPENROUTER_URL).rstrip("/")
+GEN_KEY_ENV = os.getenv("NAMEFINDER_GEN_KEY_ENV") or OPENROUTER_KEY_ENV
 # Optional OpenRouter routing. OPENROUTER_REASONING: "low" (default; also minimal,
 # medium, high) sets reasoning effort, "off" sends enabled=false (some endpoints
 # reject this), "on" leaves the model default. Pin providers with OPENROUTER_PROVIDER
@@ -289,7 +358,11 @@ OPENROUTER_SORT = os.getenv("OPENROUTER_SORT", "price").strip().lower()
 def openrouter_extras(url: str) -> dict:
     """Extra request-body fields for OpenRouter; empty for local servers."""
     if "openrouter.ai" not in url:
-        return {}
+        # Other hosted providers (e.g. Nous): thinking models burn max_tokens on reasoning and
+        # return an empty answer, so switch it off. NAMEFINDER_REASONING=on keeps the default.
+        if "localhost" in url or "127.0.0.1" in url or os.getenv("NAMEFINDER_REASONING", "off").strip().lower() == "on":
+            return {}
+        return {"reasoning": {"enabled": False}}
     extras: dict = {}
     if OPENROUTER_REASONING == "off":
         extras["reasoning"] = {"enabled": False}

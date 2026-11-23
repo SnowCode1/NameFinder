@@ -42,10 +42,10 @@ def resolve(model: str | None, default_model: str, backend: str | None = None) -
         backend = "openrouter" if config.secret(config.OPENROUTER_KEY_ENV) else "local"
     if backend in ("local", "lmstudio"):
         return "http://localhost:1234/v1", "lm-studio", model or "qwen3-4b-instruct-2507"
-    key = config.secret(config.OPENROUTER_KEY_ENV)
+    key = config.secret(config.GEN_KEY_ENV)
     if not key:
-        raise SystemExit(f"OPENROUTER_API_KEY is not set in .env. {config.WRITE_KEY_HINT}")
-    return config.OPENROUTER_URL, key, model or default_model
+        raise SystemExit(f"{config.GEN_KEY_ENV} is not set in .env. {config.WRITE_KEY_HINT}")
+    return config.GEN_URL, key, model or default_model
 
 
 async def chat_json(
@@ -72,7 +72,7 @@ async def chat_json(
             await asyncio.sleep(wait_s)
             continue
         if r.status_code == 429:
-            await asyncio.sleep(net.backoff_delay(attempt, r.headers.get("retry-after")))
+            await asyncio.sleep(net.llm_backoff_delay(attempt, r.headers.get("retry-after")))
             continue
         if r.status_code >= 500:
             await asyncio.sleep(min(60.0, 3.0 * (2 ** attempt)))

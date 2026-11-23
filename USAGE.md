@@ -95,9 +95,33 @@ namefinder rank-final --skip-llm
 
 ---
 
+## Widen the Base Dictionary (`namefinder lexicon`)
+
+`prepare` keeps mid-frequency WordNet nouns and verbs and drops many endings (-ity, -ance, -ence, -ism, -tion ...), which also removes good abstract nouns (provenance, precedence, antecedent) and every rare technical term. `lexicon` adds those back as extra base-word layers:
+
+| Layer | What it is |
+|---|---|
+| `reinstated` | ordinary-frequency nouns and verbs that `prepare` dropped for an ending or for length (up to 11 letters), minus inflections and weak endings (-ness, -ist, -ful ...) |
+| `jargon` | rarer words (zipf 1.5 and up) that WordNet files under a subject domain (law, mathematics, logic, linguistics ...) or under an abstract category (perplexity, corollary), minus sport, cooking, anatomy and similar domains |
+| `foreign` | common Romance and Scandinavian words from the OMW wordnet translations of abstract English concepts, shared by at least two languages (fase, pausa, consulta), minus near-respellings of the English word (kontroll, strategi). Each carries a gloss such as "Italian/Spanish: 'phase'". Downloads `omw-1.4` on first use |
+| `rare` | the same rare band with no tag. Large and mostly obscure, so off by default |
+
+```powershell
+namefinder lexicon --dry-run               # counts and random samples, writes nothing
+namefinder lexicon                         # adds reinstated + jargon + foreign (source 'lexicon', with a gloss)
+namefinder lexicon --layers jargon --limit 500
+namefinder lexicon --layers foreign --languages ita,fra,spa --min-languages 1   # one language family, wider net
+namefinder score --mode root --lexicon foreign --limit 600   # root-score one layer, best-first
+namefinder score --mode root --lexicon jargon --limit 600
+```
+
+The new words are unscored, so the coin loop ignores them until `score --mode root` has run (ranking uses root scores). `score --lexicon LAYER` scores one layer in the order `lexicon` inserted it (foreign: most widely shared words first), and `--limit` takes the first N of it. Each root-scoring call shows the model a one-line meaning for any word that has one (WordNet gloss, or the translation for foreign words), so rare and foreign words are scored on what they mean. The root prompt's "CANDIDATE TYPES" section tells the model how to treat them.
+
+Changing `prompts/root_prompt.md` changes the root-prompt fingerprint, so scores from before and after are not strictly comparable. If the ranking matters at the margin, re-score the core roots too with `namefinder score --mode root --refresh`. Root scoring is `--mode root` and uses `prompts/root_prompt.md`. The list lives in `words` (`lexicon` column names the layer; `words.gloss` holds the meaning); `config.LEXICON_*` tunes the frequency floor, length, skip-domains and endings.
+
 ## Coin Custom Brand Variations (`namefinder coin`)
 
-The coining engine algorithmically generates novel, pronounceable neologisms using 5 mutation engines (prefixes, Latin/Greek suffixes, overlapping portmanteau blending, syllabic truncations, and vowel shifts).
+The coining engine algorithmically generates novel, pronounceable neologisms using five rule engines (suffixes, whole-syllable truncations, overlapping portmanteau blending, compounds and twists of winners), plus the LLM engine.
 
 ### Independent Per-Variation Sampling
 
@@ -132,7 +156,20 @@ namefinder coin --no-domains --no-score --limit 50
 
 ### How Coined Names Are Generated
 
-Each candidate comes from one of five engines (prefix, suffix, truncation, portmanteau, vowel shift) applied to a base word sampled by rank. Portmanteaus fuse two words at vowel/consonant seams, so both parents are shortened (each keeps at least 40% of its letters) and the join alternates sounds. Every candidate passes one quality gate before it is stored or scored: pronounceability (`phonetics.py`, floor `COIN_MIN_PHONETIC`), no real English words, no crude fragments (`COIN_BLOCK_SUBSTRINGS`), and not already in the database.
+Each candidate comes from one of five rule engines. Four apply to a base word sampled by rank:
+
+- **suffix**: swaps the ending for one of `COIN_SUFFIXES` (chosen by measured lift).
+- **trunc**: clips a long base (7+ letters) to whole leading syllables and adds a suffix (casix from cascade).
+- **portmanteau**: fuses two words at vowel/consonant seams.
+- **compound**: two whole short words (each at most `COIN_COMPOUND_MAX_PART` letters) joined with no letters lost.
+
+The fifth, **twist**, does not start from a root: it takes one of the best coined names (the top `COIN_TWIST_POOL`, 300, by composite, taken `.com`s included, since a strong name with a lost domain still has free neighbours) and makes one small edit, so the search keeps exploring around proven names. Operators: `vowel` (shift one vowel), `mutate` (near-word edit), `respell` (sound-preserving respelling) and `ending` (a different `COIN_SUFFIXES` ending). An edit must not read worse than its winner (`COIN_TWIST_PHONETIC_SLACK`, no new vowel pair, a speakable cluster). Names are stored as engine `twist` with `parents = base,winner`: the first entry is the winner's own base (so the base bandit credits it correctly), the second is the winner that was edited. Winners are drawn best-first (geometric by rank, mean 60). With `--bases`, only winners built on those roots are used.
+
+Retired engines: `prefix` (2% tail rate), and after a measured run `vowel` (1 to 4%), `mutate` (5%, the baseline, against about 30% for the others in the same window) and `respell` (0 of 70). Names already coined with them keep their engine label, and their helpers (`vowel_shift`, `mutate_word`, `respell_word`) stay in `coin.py` for operators applied to proven winners.
+
+Each name also records its **operator**, how the engine built it (`words.operator`): suffix `replace-1`, `replace-2`, `replace-3` or `append`; trunc `clip3` to `clip6` (letters kept); portmanteau and compound the partner kind (`concept` root or `scored` word), compounds also the order (`base+concept`, `scored+base`). Read them with `namefinder engines --by operator`.
+
+Portmanteaus fuse two words at vowel/consonant seams, so both parents are shortened (each keeps at least 40% of its letters) and the join alternates sounds. Every candidate passes one quality gate before it is stored or scored: pronounceability (`phonetics.py`, floor `COIN_MIN_PHONETIC`), no real English words, no crude fragments (`COIN_BLOCK_SUBSTRINGS`), and not already in the database.
 
 **Near-duplicates.** A candidate one letter away from an existing coined name (one letter added, removed or changed: `origagrapf` vs `origagraph`) is also dropped. The exception is when that neighbour scored in the top 5% of coined names, so variations on winners are still explored while respellings of weak names stop costing scoring calls. The LLM engine is shown its recently dropped near-copies and told to vary the idea, not a single letter. It also adjusts how many names it requests to the share that actually passes. When the rule engines come up short, the LLM fills the gap. Tune it with `COIN_NEAR_DUP` / `COIN_NEAR_DUP_KEEP_QUANTILE` in `config.py`. Before this filter, about half of a day's coined names were such respellings.
 
@@ -160,9 +197,9 @@ Each stage takes `--model` (defaults `OPENROUTER_IDEAS_MODEL` and `OPENROUTER_NA
 
 **Steering toward verbs.** Names that work as "I just ___ it" are favoured three ways, all tunable in `config.py` (`COIN_VERB_*`, `COIN_LEARN_VERB`): (1) a free `phonetics.verb_score` (short, hard-consonant ending, clean -ed/-ing) softly biases every engine, so unlikely verbs are kept less often but never banned, and also helps pick among splice options; (2) parents whose common -ing/-ed forms exist in wordfreq (trace, link, focus) are picked up to twice as often; (3) engine and partner learning now weights each composite by how verb-like the LLM rated the name.
 
-**LLM coining (`engine='llm'`).** A sixth engine asks a model to invent names from your top base words. `--llm-share` (default 0.3, `0` disables) sets the fraction of each batch it supplies; `--coin-model` / `OPENROUTER_COIN_MODEL` picks its model (default: the scoring model). The model only proposes: every name goes through the same quality gate, de-duplication, scoring, domain check and engine learning as the rule engines, and is stored with its parent word. Two feedback loops run automatically: the prompt shows the model your best and worst earlier LLM names plus the names the filters recently rejected, and once 15+ rated LLM names exist its share is scaled between 0.5x and 2x by how they score against the rule engines (printed as `[learn] llm share`). Override the system prompt with `prompts/coin_prompt.md` (gitignored). A failed LLM request never stops the loop. It runs under the same `--max-cost`. One-shot `coin --limit N` uses it too; `--bases` runs stay rule-only.
+**LLM coining (`engine='llm'`).** A sixth engine asks a model to invent names from your top base words. `--llm-share` (default 0.3, `0` disables) sets the fraction of each batch it supplies; `--coin-model` / `OPENROUTER_COIN_MODEL` picks its model (default: the scoring model). The model only proposes: every name goes through the same quality gate, de-duplication, scoring, domain check and engine learning as the rule engines, and is stored with its parent word. Two feedback loops run automatically: the prompt shows the model your best and worst earlier LLM names plus the names the filters recently rejected (and, for parents from the extra layers, the meaning stored in `words.gloss`, so the model builds on what a rare or foreign word means), and once 15+ rated LLM names exist its share is scaled between 0.5x and 2x by how they score against the rule engines (printed as `[learn] llm share`). Override the system prompt with `prompts/coin_prompt.md` (gitignored). A failed LLM request never stops the loop. It runs under the same `--max-cost`. One-shot `coin --limit N` uses it too; `--bases` runs stay rule-only.
 
-Each coined word records its engine and parents. Between cycles the loop re-weights engines and portmanteau partner roots by the scores their earlier words earned (shrunk toward the overall mean, with 30% kept uniform so no engine starves), and prints the engine weights each cycle.
+Each coined word records its engine and parents. Between cycles the loop re-weights engines and portmanteau and compound partner roots by the scores their earlier words earned (shrunk toward the overall mean, with 30% kept uniform so no engine starves), and prints the engine weights each cycle.
 
 **Focus mode (`coin --continuous --bases a,b`).** Every name is built on the given roots; portmanteaus still blend them with any scored word or concept root. The LLM engine sees each root's strongest existing names (to build on, not repeat), takes its best/worst feedback from names on those roots, and fills any gap the rule engines leave once a root's simple variations run out.
 
@@ -182,6 +219,21 @@ The coin loop's bandit judges bases only on names with a spoken review (`BASE_SP
 The `recent` column is red when a base's last 150 names hit well below its all-time rate (it is running dry) and green when it is improving.
 
 Each coin cycle draws a hit rate for every base from `Beta(1 + hits, 19 + misses)` over its recent window (Thompson sampling) and multiplies that base's sampling weight by the draw relative to the 5% prior, printed as `[learn] bases favoured`. Proven bases are picked more, exhausted ones fade, and untried bases still get explored. The dictionary rank prior fades as a base gathers evidence (half its influence after 50 names), so a strong base deep in the ranking can still be chosen often. In focus mode with several roots, the bandit splits picks between them. Tune or disable it with `BASE_*` in `config.py` (`BASE_BANDIT = False` restores rank-only sampling).
+
+### Engine Report (`namefinder engines`)
+
+Shows which coining engines produce top-tier names, so engine and rule changes can be judged on data.
+
+```powershell
+namefinder engines                         # tail rate, mean and best name per engine
+namefinder engines --threshold 0.372       # pin the tail threshold to compare before/after a change
+namefinder engines --lift ending           # tail-rate lift by the last two letters (also: last, start, length)
+namefinder engines --by operator --since 6h  # tail rate per engine:operator (names coined since operators were tracked)
+namefinder engines --by layer --since 6h     # tail rate by the base word's layer: core, reinstated, jargon, foreign
+namefinder engines --spoken                # only names with an LLM pronunciation review
+```
+
+The tail threshold defaults to the top 5% of coined composites, which moves as the pool grows. Pin it with `--threshold` when comparing a new engine against an old run, and wait for a few hundred scored names per engine before reading its rate. `--lift` is how `COIN_SUFFIXES` in `config.py` was chosen: endings with lift under 1x (`-el`, `-ar`, `-or`) were dropped, the 2x-plus ones (`-ex`, `-um`, `-os`) kept. The retired `prefix` engine and the rewritten `trunc` (whole-syllable clips) and `vowel` (best-reading single vowel shift) engines are judged the same way.
 
 ## View Rankings and Status in CLI
 

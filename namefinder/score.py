@@ -392,11 +392,16 @@ async def score_words_openrouter(
                 if budget.exhausted():
                     skipped += len(chunk)
                     return
+                with db.session(db_path) as gconn:
+                    meanings = db.glosses(gconn, chunk)
+                # unfamiliar dictionary words come with a short meaning, so the model scores the word, not a guess
+                gloss_note = ("\n\nMeanings of less common candidates (for context only; keep the word keys exactly as given):\n"
+                              + "\n".join(f"- {w}: {g}" for w, g in meanings.items())) if meanings else ""
                 body = {
                     "model": model,
                     "messages": [
                         {"role": "system", "content": active_system_prompt},
-                        {"role": "user", "content": user_prompt.format(words=", ".join(chunk))},
+                        {"role": "user", "content": user_prompt.format(words=", ".join(chunk)) + gloss_note},
                     ],
                     "temperature": 0.2,
                     # the spoken review adds ~60 output tokens per brand word
@@ -567,6 +572,7 @@ def run(
     free_domains_only: bool = False,
     clear_only: bool = False,
     mode: str = "auto",
+    lexicon: str | None = None,
 ) -> None:
     if clear_only:
         with db.session(db_path) as conn:
@@ -622,8 +628,6 @@ def run(
                 todo = [r["word"] for r in conn.execute(
                     f"SELECT w.word FROM words w WHERE 1=1 {coined_clause} ORDER BY w.zipf DESC"
                 )]
-            if limit:
-                todo = todo[:limit]
         else:
             if free_domains_only:
                 todo = [r["word"] for r in conn.execute(
@@ -639,8 +643,13 @@ def run(
                 ).fetchall()]
             else:
                 todo = db.words_without_scores(conn, qversion, include_coined=include_coined)
-            if limit:
-                todo = todo[:limit]
+        if lexicon:
+            # one extra-word layer only, best-first (the order `lexicon` inserted them in)
+            order = {r["word"]: i for i, r in enumerate(
+                conn.execute("SELECT word FROM words WHERE lexicon = ? ORDER BY rowid", (lexicon,)))}
+            todo = sorted((w for w in todo if w in order), key=order.get)
+        if limit:
+            todo = todo[:limit]
         cached = conn.execute(
             "SELECT COUNT(*) c FROM scores WHERE qversion = ?", (qversion,)
         ).fetchone()["c"]

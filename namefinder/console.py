@@ -6,7 +6,7 @@ import os
 import re
 import sqlite3
 import sys
-from typing import Any, Sequence
+from typing import Any, Collection, Sequence
 
 import shutil
 from rich import box
@@ -331,44 +331,54 @@ def show_live_top_10(
 
 
 def print_score_grid(
-    items: Sequence[tuple[str, float, bool]],
+    items: Sequence[tuple[str, float, str | None]],
     title: str = "",
-    top_checked: int = 0,
+    checked: Collection[str] = (),
 ) -> None:
-    """Compact multi-column list of (word, composite, is_llm), best first, reading down each column.
+    """Scored names grouped by engine: a header per engine, then its names best first, reading down columns.
 
-    Words in the best `top_checked` get a domain check, so they are underlined.
+    `items` are (word, composite, engine). Names in `checked` got a domain check and are underlined.
+    Engines are ordered by their best name, so the group holding the cycle's winner comes first.
     """
     if not items:
         return
-    items = sorted(items, key=lambda t: -t[1])
-    wlen = max(len(w) for w, _, _ in items)
-    cell = wlen + 8                      # word + marker + space + score
-    gap = 3
-    width = _console.width
-    cols = max(1, min(5, (width + gap) // (cell + gap)))
-    rows = -(-len(items) // cols)
+    groups: dict[str, list[tuple[str, float]]] = {}
+    for word, comp, engine in items:
+        groups.setdefault(engine or "other", []).append((word, comp or 0.0))
+    for g in groups.values():
+        g.sort(key=lambda t: -t[1])
+    order = sorted(groups, key=lambda e: -groups[e][0][1])
 
-    hint = "[dim]* LLM-coined, underlined = domain-checked[/]" if any(i[2] for i in items) else \
-        "[dim]underlined = domain-checked[/]"
-    _console.print(f"[bold cyan]{title}[/]  {hint}" if title else hint)
-    for r in range(rows):
-        line = Text()
-        for c in range(cols):
-            idx = c * rows + r
-            if idx >= len(items):
-                break
-            word, comp, llm = items[idx]
-            comp = comp or 0.0
-            color = "bold green" if comp >= 0.85 else "bold cyan" if comp >= 0.70 else "yellow" if comp >= 0.50 else "dim"
-            word_style = "bold white underline" if idx < top_checked else "white"
-            if c:
-                line.append(" " * gap)
-            line.append(word, style=word_style)
-            line.append(" " * (wlen - len(word)))
-            line.append("*" if llm else " ", style="magenta")
-            line.append(f" {comp:.3f}", style=color)
-        _console.print(line)
+    wlen = max(len(w) for w, _, _ in items)
+    cell = wlen + 6                      # word + space + score
+    gap = 3
+    cols = max(1, min(5, (_console.width + gap) // (cell + gap)))
+
+    _console.print(f"[bold cyan]{title}[/]  [dim]underlined = domain-checked[/]" if title
+                   else "[dim]underlined = domain-checked[/]")
+    for engine in order:
+        names = groups[engine]
+        mean = sum(c for _, c in names) / len(names)
+        head = Text()
+        head.append(f" {engine} ", style="bold white on magenta" if engine == "llm" else "bold white on blue")
+        head.append(f"  {len(names)} name{'' if len(names) == 1 else 's'}, best {names[0][1]:.3f}, mean {mean:.3f}", style="dim")
+        _console.print(head)
+        rows = -(-len(names) // cols)
+        for r in range(rows):
+            line = Text("  ")
+            for c in range(cols):
+                idx = c * rows + r
+                if idx >= len(names):
+                    break
+                word, comp = names[idx]
+                color = ("bold green" if comp >= 0.85 else "bold cyan" if comp >= 0.70
+                         else "yellow" if comp >= 0.50 else "dim")
+                if c:
+                    line.append(" " * gap)
+                line.append(word, style="bold white underline" if word in checked else "white")
+                line.append(" " * (wlen - len(word)))
+                line.append(f" {comp:.3f}", style=color)
+            _console.print(line)
 
 
 def print_base_table(stats: Sequence[Any], threshold: float, title: str = "") -> None:
@@ -393,6 +403,34 @@ def print_base_table(stats: Sequence[Any], threshold: float, title: str = "") ->
             Text(f"{s.recent_rate:.3f}", style=trend),
             f"{s.best:.3f}", s.best_word,
         )
+    _console.print(table)
+
+
+def print_engine_table(rows: Sequence[Any], threshold: float, title: str = "", label: str = "engine") -> None:
+    """Engine report: rows are (engine, names, mean, tail_rate, best_word, best)."""
+    table = Table(title=title or None, box=box.SIMPLE_HEAVY, title_style="bold cyan", header_style="bold")
+    table.add_column(label, style="bold white")
+    table.add_column("names", justify="right")
+    table.add_column("mean", justify="right")
+    table.add_column(f"tail rate (≥{threshold:.3f})", justify="right")
+    table.add_column("best", justify="right")
+    table.add_column("best name", style="white")
+    for eng, n, mean, rate, best_word, best in rows:
+        style = "bold green" if rate >= 0.06 else "cyan" if rate >= 0.03 else "dim"
+        table.add_row(eng, str(n), f"{mean:.3f}", Text(f"{rate:.1%}", style=style), f"{best:.3f}", best_word)
+    _console.print(table)
+
+
+def print_lift_table(rows: Sequence[Any], base_rate: float, feature: str, title: str = "") -> None:
+    """Feature lift: rows are (value, names, tail_rate, lift), best lift first."""
+    table = Table(title=title or None, box=box.SIMPLE_HEAVY, title_style="bold cyan", header_style="bold")
+    table.add_column(feature, style="bold white")
+    table.add_column("names", justify="right")
+    table.add_column("tail rate", justify="right")
+    table.add_column(f"lift (base {base_rate:.1%})", justify="right")
+    for value, n, rate, lift in rows:
+        style = "bold green" if lift >= 1.5 else "red" if lift <= 0.5 else "white"
+        table.add_row(str(value), str(n), f"{rate:.1%}", Text(f"{lift:.2f}x", style=style))
     _console.print(table)
 
 

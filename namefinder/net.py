@@ -58,6 +58,16 @@ def backoff_delay(attempt: int, retry_after: str | None = None) -> float:
     return min(60.0, (2 ** attempt) * 0.75) + random.uniform(0, 0.4)
 
 
+def llm_backoff_delay(attempt: int, retry_after: str | None = None) -> float:
+    """429 wait for LLM calls: providers with per-minute token limits need tens of seconds, not seconds."""
+    if retry_after:
+        try:
+            return min(90.0, max(1.0, float(retry_after)))
+        except ValueError:
+            pass
+    return min(90.0, 8.0 * (2 ** attempt)) + random.uniform(0, 3.0)
+
+
 def client(timeout: float = 20.0, **kwargs: Any) -> httpx.Client:
     return httpx.Client(
         timeout=httpx.Timeout(timeout, connect=10.0),

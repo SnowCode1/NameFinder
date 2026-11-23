@@ -173,6 +173,9 @@ CREATE TABLE IF NOT EXISTS name_origins (
 WORD_EXTRA_COLUMNS = (
     ("engine", "TEXT"),    # coining engine that produced the word
     ("parents", "TEXT"),   # "base" or "base,partner" the word was derived from
+    ("lexicon", "TEXT"),   # extra base-word layer (reinstated, jargon, rare); NULL for the core wordlist
+    ("gloss", "TEXT"),     # short WordNet meaning, shown to the scorer for unfamiliar words
+    ("operator", "TEXT"),  # how the engine built the word (suffix: replace-1; trunc: clip4; compound: base+concept)
 )
 
 # Columns added to `scores` after the first release (name, SQL type).
@@ -243,6 +246,28 @@ def upsert_words(conn: sqlite3.Connection, rows: Iterable[tuple[str, str, float]
         )
         n += cur.rowcount
     return n
+
+
+def upsert_lexicon(conn: sqlite3.Connection, rows: Iterable[tuple[str, str, float, str, str]], ts: str) -> int:
+    """Add (word, pos, zipf, layer, gloss) rows from `lexicon`; existing words are left untouched."""
+    n = 0
+    for word, pos, zipf, layer, gloss in rows:
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO words(word, pos, zipf, source, created_at, lexicon, gloss) VALUES(?,?,?,?,?,?,?)",
+            (word, pos, zipf, "lexicon", ts, layer, gloss),
+        )
+        n += cur.rowcount
+    conn.commit()
+    return n
+
+
+def glosses(conn: sqlite3.Connection, words: list[str]) -> dict[str, str]:
+    """word -> gloss for those of `words` that have one."""
+    if not words:
+        return {}
+    marks = ",".join("?" * len(words))
+    return {r["word"]: r["gloss"] for r in conn.execute(
+        f"SELECT word, gloss FROM words WHERE gloss IS NOT NULL AND word IN ({marks})", words)}
 
 
 def count_words(conn: sqlite3.Connection) -> int:

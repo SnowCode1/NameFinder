@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from typing import Iterable, Sequence
 
 
-from . import budget, config, console, db, domains, phonetics, score
+from . import budget, config, console, db, domains, phonetics, score, wordlike
 
 PREFIXES = (
     "in", "re", "con", "syn", "per", "pro", "meta", "omni",
@@ -251,6 +251,8 @@ def acceptable(word: str, min_len: int = 5, max_len: int = 10) -> bool:
         return False
     if any(w.startswith(e) or w.endswith(e) for e in config.COIN_BLOCK_EDGES):
         return False
+    if config.COIN_MIN_WORDLIKE_PCT and not wordlike.is_wordlike(w, config.COIN_MIN_WORDLIKE_PCT):
+        return False
     return phonetics.analyze(w).score >= config.COIN_MIN_PHONETIC
 
 
@@ -325,7 +327,184 @@ def best_splice(a: str, b: str, min_len: int, max_len: int, top: int = 3) -> str
     return random.choice(scored[:top])[1]
 
 
-ENGINES = ("prefix", "suffix", "trunc", "portmanteau", "vowel")
+# "prefix" is retired: generic Latin prefixes had a 2% tail rate and the scorer penalises most of them
+# (config.GENERIC_PREFIX_PENALTY). Names already coined with it keep their engine label.
+# "vowel", "mutate" and "respell" are retired as blind engines after measured runs: vowel 1-4%, mutate 5% (the
+# baseline, against ~30% for the other engines in the same window), respell 0 of 70. Their helpers stay for
+# operators applied to proven winners. Names already coined with them keep their engine label.
+ENGINES = ("suffix", "trunc", "portmanteau", "compound", "twist")
+
+
+def _attach(stem: str, ending: str) -> str:
+    """Join a stem and an ending, dropping the stem's last vowel when two vowels would meet."""
+    if stem and ending and stem[-1] in "aeiou" and ending[0] in "aeiou":
+        return stem[:-1] + ending
+    return stem + ending
+
+
+def syllable_clips(base: str, min_clip: int = 3) -> list[str]:
+    """Stems made of whole leading syllables (min_clip-6 letters), shortest first: 'lattice' -> 'lat', 'latti'."""
+    syls = phonetics.syllabify(base)
+    out, head = [], ""
+    for s in syls[:-1]:
+        head += s
+        if min_clip <= len(head) <= 6:
+            out.append(head)
+    return out
+
+
+def pick_clip(base: str) -> str | None:
+    """A clip for the trunc engine, or None when the base is too short to clip meaningfully.
+
+    Measured: winners clip long bases (7+ letters) and keep a recognisable stem (onto-, topo-, casc-);
+    losers clip 3 letters off short words (fa-, pro-, te-). So short bases are skipped, clips under
+    COIN_TRUNC_MIN_CLIP are skipped, and longer clips are likelier (weight = clip length squared).
+    """
+    if len(base) < config.COIN_TRUNC_MIN_BASE:
+        return None
+    clips = syllable_clips(base, min_clip=config.COIN_TRUNC_MIN_CLIP)
+    if not clips:
+        return None
+    return random.choices(clips, weights=[len(c) ** 2 for c in clips], k=1)[0]
+
+
+_START_OK = phonetics.VALID_ONSETS | {"kn", "wr", "ps", "gn", "chr", "rh"}
+
+
+def shape_ok(w: str, base: str = "") -> bool:
+    """Do the opening and every internal consonant cluster look like English? (rceptox, pslexus, taxnom fail).
+
+    Used by the engines that edit real words (mutate, respell), where one edit can leave an
+    unspeakable cluster. Clusters follow `_seam_ok`: a pair must be a double, a coda pair or an onset.
+    Clusters and openings already present in `base` pass, so only what the edit created is judged.
+    """
+    i = 0
+    while i < len(w) and w[i] not in "aeiouy":
+        i += 1
+    if i > 1 and w[:i] not in _START_OK and not base.startswith(w[:i]):
+        return False
+    inherited = set(re.findall(r"[^aeiouy]{2,}", base))
+    for m in re.finditer(r"[^aeiouy]{2,}", w):
+        run = m.group()
+        if m.start() == 0 or run in inherited:
+            continue
+        if m.end() == len(w):                                 # final cluster: a coda pair (ft, nd, rk, ...)
+            if not (len(run) == 2 and (run in _CODA_PAIRS or run in _DOUBLES)):
+                return False
+        elif len(run) == 2:
+            if not (run in _DOUBLES or run in _CODA_PAIRS or run in phonetics.VALID_ONSETS):
+                return False
+        elif not (run[-2:] in phonetics.VALID_ONSETS or run[-3:] in phonetics.VALID_ONSETS):
+            return False
+    return True
+
+
+def _new_vowel_pair(base: str, cand: str) -> bool:
+    """True when cand has two neighbouring vowels that base did not (baacon, noice)."""
+    def pairs(s: str) -> int:
+        return sum(a in "aeiou" and b in "aeiou" for a, b in zip(s, s[1:]))
+    return pairs(cand) > pairs(base)
+
+
+_SOUND_GROUPS = ("bp", "dt", "gk", "ckq", "fv", "mn", "lr", "sz", "jg")
+_INSERTS = "aeiouylrsx"
+
+
+def near_words(base: str) -> set[str]:
+    """Strings one edit from a word that keep it recognisable: the first letter never changes.
+
+    Edits: a vowel for another vowel, a consonant for a similar-sounding one (p/b, t/d, k/g, ...),
+    deleting a letter, inserting a vowel or liquid, or swapping two neighbours.
+    """
+    out: set[str] = set()
+    n = len(base)
+    for i in range(1, n):
+        ch = base[i]
+        if ch in "aeiouy":
+            out.update(base[:i] + v + base[i + 1 :] for v in "aeiouy" if v != ch)
+        else:
+            for grp in _SOUND_GROUPS:
+                if ch in grp:
+                    out.update(base[:i] + g + base[i + 1 :] for g in grp if g != ch)
+            if i == n - 1:
+                out.add(base[:i] + "x")
+        out.add(base[:i] + base[i + 1 :])                              # deletion
+        if i + 1 < n:
+            out.add(base[:i] + base[i + 1] + base[i] + base[i + 2 :])  # swap
+    for i in range(1, n + 1):
+        out.update(base[:i] + ch + base[i:] for ch in _INSERTS)
+    out.discard(base)
+    return out
+
+
+def mutate_word(base: str, min_len: int, max_len: int, top: int = 5) -> str | None:
+    """A near-word of `base` that reads well and is not itself a word; a second edit follows 30% of the time."""
+    def good(c: str) -> bool:
+        return not _new_vowel_pair(base, c) and shape_ok(c, base) and acceptable(c, min_len=min_len, max_len=max_len)
+
+    pool = {c for c in near_words(base) if good(c)}
+    if pool and random.random() < 0.3:
+        # a second edit, tried on a handful of the first-edit results to keep this cheap
+        for c in random.sample(sorted(pool), min(6, len(pool))):
+            pool |= {c2 for c2 in near_words(c) if c2 != base and good(c2)}
+    if not pool:
+        return None
+    ranked = sorted(pool, key=lambda c: phonetics.analyze(c).score
+                    + config.COIN_VERB_SPLICE_WEIGHT * phonetics.verb_score(c), reverse=True)
+    return random.choice(ranked[:top])
+
+
+# Respelling rules: (spelling, replacement). Each is tried at every occurrence, one at a time.
+# Kept to a few sound-preserving swaps; broader vowel-digraph rules (ai->ay, ee->i, ie->y) made junk like chayn.
+_RESPELL_RULES = (
+    ("ph", "f"), ("f", "ph"), ("ck", "k"), ("c", "k"), ("k", "c"), ("y", "i"),
+    ("s", "z"), ("z", "s"), ("cks", "x"), ("ks", "x"), ("gh", "g"),
+)
+
+
+def respellings(base: str) -> set[str]:
+    """Alternative spellings of a word that keep its sound: ph/f, c/k, y/i, dropped silent e, -er to -r."""
+    out: set[str] = set()
+    for old, new in _RESPELL_RULES:
+        start = 0
+        while (i := base.find(old, start)) != -1:
+            out.add(base[:i] + new + base[i + len(old) :])
+            start = i + 1
+    if len(base) >= 5 and base.endswith("e") and base[-2] not in "aeiou":
+        out.add(base[:-1])                                              # silent e: probe -> prob
+    if len(base) >= 5 and base.endswith(("er", "or")):
+        out.add(base[:-2] + base[-1])                                   # flicker -> flickr
+    for i in range(1, len(base) - 1):
+        if base[i] == base[i + 1] and base[i] not in "aeiou":
+            out.add(base[:i] + base[i + 1 :])                           # double -> single
+    out.discard(base)
+    return out
+
+
+def respell_word(base: str, min_len: int, max_len: int) -> str | None:
+    """A respelling of `base` that is not a word and passes the gate (random among the valid ones)."""
+    pool = [c for c in respellings(base)
+            if shape_ok(c, base) and not _new_vowel_pair(base, c) and acceptable(c, min_len=min_len, max_len=max_len)]
+    return random.choice(pool) if pool else None
+
+
+def vowel_shift(base: str, top: int = 3) -> str | None:
+    """Change one vowel to another, choosing among the few results that read best (random among them)."""
+    options: dict[str, float] = {}
+    for i, ch in enumerate(base):
+        if ch in "aeiou":
+            for v in "aeiou":
+                if v != ch:
+                    cand = base[:i] + v + base[i + 1 :]
+                    # a shift must not create a new vowel pair (baacon, noice)
+                    if any(a in "aeiou" and b in "aeiou" for a, b in zip(cand, cand[1:])) and not any(
+                            a in "aeiou" and b in "aeiou" for a, b in zip(base, base[1:])):
+                        continue
+                    options[cand] = phonetics.analyze(cand).score + 0.1 * wordlike.score(cand)
+    if not options:
+        return None
+    best = sorted(options, key=options.get, reverse=True)[:top]
+    return random.choice(best)
 
 
 def signal(r) -> float:
@@ -420,7 +599,7 @@ def learn_weights(conn, qversion: str) -> tuple[dict[str, float], dict[str, floa
     for r in rows:
         sig = signal(r)
         by_engine.setdefault(r["engine"], []).append(sig)
-        if r["engine"] == "portmanteau" and r["parents"] and "," in r["parents"]:
+        if r["engine"] in ("portmanteau", "compound") and r["parents"] and "," in r["parents"]:
             by_partner.setdefault(r["parents"].split(",")[1], []).append(sig)
 
     overall = statistics.fmean(signal(r) for r in rows)
@@ -457,6 +636,67 @@ def sample_base_words(ranked_words: Sequence[Any], count: int = 15, half_life: f
     return sampled
 
 
+TWIST_OPERATORS = ("vowel", "mutate", "respell", "ending")
+
+
+def load_winners(conn, qversion: str, focus: Sequence[str] | None = None, n: int | None = None) -> list[tuple[str, str]]:
+    """(name, base) for the best coined names by composite, best first: the pool the twist engine edits.
+
+    Taken names are included on purpose: a strong name whose .com is gone still has free neighbours.
+    With `focus`, only names built on those bases count.
+    """
+    n = n or config.COIN_TWIST_POOL
+    rows = conn.execute(
+        """
+        SELECT w.word, w.parents FROM words w
+        JOIN scores s ON s.word = w.word AND s.qversion = ?
+        WHERE w.source = 'coined' AND w.parents IS NOT NULL AND s.composite IS NOT NULL
+        ORDER BY s.composite DESC LIMIT ?
+        """,
+        (qversion, n * 4 if focus else n),
+    ).fetchall()
+    out = [(r["word"], r["parents"].split(",")[0]) for r in rows]
+    if focus:
+        keep = set(focus)
+        out = [t for t in out if t[1] in keep][:n]
+    return out
+
+
+def swap_ending(w: str) -> str | None:
+    """The same name with a different closing suffix from COIN_SUFFIXES (casix -> casos)."""
+    sufs = config.COIN_SUFFIXES
+    stem = None
+    for s in sorted(sufs, key=len, reverse=True):
+        if w.endswith(s) and len(w) - len(s) >= 3:
+            stem = w[: -len(s)]
+            break
+    if stem is None and len(w) > 5:
+        stem = w[:-2]
+    if not stem:
+        return None
+    new = random.choice([s for s in sufs if not w.endswith(s)])
+    cand = _attach(stem, new)
+    return None if re.search(r"([aeiou])\1", cand) else cand
+
+
+def twist_word(winner: str, op: str, min_len: int, max_len: int) -> str | None:
+    """One small edit of a proven name: a vowel shift, a near-word mutation, a respelling or a new ending."""
+    if op == "vowel":
+        cand = vowel_shift(winner)
+    elif op == "mutate":
+        cand = mutate_word(winner, min_len, max_len)
+    elif op == "respell":
+        cand = respell_word(winner, min_len, max_len)
+    else:
+        cand = swap_ending(winner)
+    if not cand or cand == winner or _new_vowel_pair(winner, cand) or not shape_ok(cand, winner):
+        return None
+    # an edit of a proven name must not read worse than the name itself (puthene, cainmup, claamweb)
+    if phonetics.analyze(cand).score < phonetics.analyze(winner).score - config.COIN_TWIST_PHONETIC_SLACK:
+        return None
+    return cand
+
+
 def sample_one_variation(
     ranked_words: Sequence[Any],
     weights: Sequence[float],
@@ -467,12 +707,16 @@ def sample_one_variation(
     partner_weights: dict[str, float] | None = None,
     focus: Sequence[str] | None = None,
     focus_weights: Sequence[float] | None = None,
-) -> tuple[str, str, str, str | None] | None:
+    winners: Sequence[tuple[str, str]] | None = None,
+) -> tuple[str, str, str, str | None, str] | None:
     """Sample one base word and generate a single valid variation.
 
     With `focus`, the base is always one of those words (weighted by `focus_weights` if given),
     while portmanteau partners still come from the whole ranking and the concept roots.
-    Returns (candidate, base, engine, partner); partner is only set for portmanteaus.
+    `winners` (best coined names, best first, as (name, base)) feeds the twist engine, which edits one of them
+    and credits the winner's own base; its partner slot holds the winner.
+    Returns (candidate, base, engine, partner, operator); partner is set for portmanteaus and compounds,
+    and `operator` says how the engine built it (stored in words.operator for `engines --by operator`).
     """
     words = [r["word"] if hasattr(r, "__getitem__") else str(r) for r in ranked_words]
     ew = [(engine_weights or {}).get(e, 1.0) for e in ENGINES]
@@ -485,29 +729,48 @@ def sample_one_variation(
         engine = random.choices(ENGINES, weights=ew, k=1)[0]
         cand = None
         other = None
+        op = ""
 
-        if engine == "prefix":
-            p = random.choice(PREFIXES)
-            cand = p + base
-            if p.endswith("o") and base.startswith("o"):
-                cand = p[:-1] + base
+        if engine == "twist":
+            if not winners:
+                continue
+            win, wbase = winners[min(int(random.expovariate(1 / 60)), len(winners) - 1)]
+            op = random.choice(TWIST_OPERATORS)
+            cand, base, other = twist_word(win, op, min_len, max_len), wbase, win
 
-        elif engine == "suffix":
-            s = random.choice(SUFFIXES)
+        # trunc needs a long base and compound a short one; redraw rather than lose the attempt,
+        # so each engine's share of names tracks its learned weight
+        fits = {"trunc": lambda b: len(b) >= config.COIN_TRUNC_MIN_BASE,
+                "compound": lambda b: len(b) <= config.COIN_COMPOUND_MAX_PART}.get(engine)
+        if fits and not fits(base):
+            for _ in range(10):
+                alt = (random.choices(focus, weights=focus_weights, k=1)[0] if focus
+                       else random.choices(words, weights=weights, k=1)[0])
+                if fits(alt):
+                    base = alt
+                    break
+
+        if engine == "suffix":
+            s = random.choice(config.COIN_SUFFIXES)
             if base[-1] in "aeiouy":
-                cand = base[:-1] + s
+                cand, op = base[:-1] + s, "replace-1"
             elif len(base) > 4 and base[-2:] in ("al", "us", "ic", "is", "on", "um", "er", "en", "ar"):
-                cand = base[:-2] + s
+                cand, op = base[:-2] + s, "replace-2"
             elif len(base) > 5 and base[-3:] in ("ing", "ion", "oid", "ian", "ite"):
-                cand = base[:-3] + s
+                cand, op = base[:-3] + s, "replace-3"
             else:
-                cand = base + s
+                cand, op = base + s, "append"
 
-        elif engine == "trunc" and len(base) >= 5:
-            cand = base[:4] + random.choice(("x", "on", "is", "ix", "or", "ar", "el", "ic", "al"))
+        elif engine == "trunc":
+            clip = pick_clip(base)
+            if clip:
+                cand, op = _attach(clip, random.choice(config.COIN_SUFFIXES)), f"clip{len(clip)}"
+                if re.search(r"([aeiou])\1", cand):
+                    cand = None          # theo + ex -> theex
 
         elif engine == "portmanteau":
-            if random.random() < 0.5:
+            op = "concept" if random.random() < 0.5 else "scored"
+            if op == "concept":
                 other = random.choices(
                     CONCEPT_ROOTS,
                     weights=[pw.get(r, 1.0) * (1.0 + config.COIN_VERB_PARENT_BOOST * verbness(r)) for r in CONCEPT_ROOTS],
@@ -518,11 +781,28 @@ def sample_one_variation(
             if other != base:
                 cand = best_splice(base, other, min_len, max_len)
 
-        elif engine == "vowel":
-            vowels = [i for i, ch in enumerate(base) if ch in "aeiou"]
-            if vowels:
-                idx = random.choice(vowels)
-                cand = base[:idx] + random.choice("aeiou") + base[idx + 1 :]
+        elif engine == "compound":
+            # two whole short words, no letters lost: the base plus a concept root or another scored word
+            part = config.COIN_COMPOUND_MAX_PART
+            roots = [r for r in CONCEPT_ROOTS if len(r) <= part]
+            root_w = [pw.get(r, 1.0) * (1.0 + config.COIN_VERB_PARENT_BOOST * verbness(r)) for r in roots]
+            for _ in range(12):      # most pairs overflow max_len, so try several partners
+                if len(base) > part:
+                    break
+                kind = "concept" if (roots and random.random() < 0.4) else "scored"
+                if kind == "concept":
+                    other = random.choices(roots, weights=root_w, k=1)[0]
+                else:
+                    other = random.choices(words, weights=weights, k=1)[0]
+                if other == base or len(other) > part or len(base) + len(other) > max_len:
+                    other = None
+                    continue
+                first = random.random() < 0.5
+                a, b = (base, other) if first else (other, base)
+                if _seam_ok(a + b, len(a)) and acceptable(a + b, min_len=min_len, max_len=max_len):
+                    cand, op = a + b, (f"base+{kind}" if first else f"{kind}+base")
+                    break
+                other = None
 
         if cand and cand != base and acceptable(cand, min_len=min_len, max_len=max_len):
             # soft verb bias: unlikely verbs are dropped more often, never ruled out
@@ -530,7 +810,7 @@ def sample_one_variation(
             vs = max(0.0, (phonetics.verb_score(cand) - 0.5) / 0.5)   # 0.5 and below = worst
             if random.random() > floor + (1.0 - floor) * vs:
                 continue
-            return cand, base, engine, other
+            return cand, base, engine, other, op
 
     return None
 
@@ -622,9 +902,10 @@ def coin_stream_batch(
             learned = learn_weights(conn, config.QUESTION_VERSION)
         known = {r[0] for r in conn.execute("SELECT word FROM words")}
         near = NearIndex.load(conn, config.QUESTION_VERSION)
+        winners = load_winners(conn, config.QUESTION_VERSION, focus)
     engine_w, partner_w = learned
     pairs: list[tuple[str, str]] = []
-    provenance: dict[str, tuple[str, str]] = {}
+    provenance: dict[str, tuple[str, str, str]] = {}
     seen = set()
 
     attempts = 0
@@ -633,13 +914,14 @@ def coin_stream_batch(
         res = sample_one_variation(
             ranked_words, weights, min_len=min_len, max_len=max_len,
             engine_weights=engine_w, partner_weights=partner_w, focus=focus, focus_weights=focus_w,
+            winners=winners,
         )
         if res:
-            cand, base, engine, other = res
+            cand, base, engine, other, op = res
             if cand not in seen and cand not in known and near.admit(cand):
                 seen.add(cand)
                 pairs.append((cand, base))
-                provenance[cand] = (engine, f"{base},{other}" if other else base)
+                provenance[cand] = (engine, f"{base},{other}" if other else base, op)
 
     if near.dropped:
         print(f"[coin] rule engines: {near.dropped} near-duplicates of weaker names dropped")
@@ -660,11 +942,11 @@ def coin_stream_batch(
 
         ts = _now()
         for cand, base in novel_pairs:
-            engine, parents = provenance[cand]
+            engine, parents, op = provenance[cand]
             conn.execute(
-                "INSERT OR IGNORE INTO words (word, pos, zipf, source, created_at, engine, parents) "
-                "VALUES (?, 'n', 3.0, 'coined', ?, ?, ?)",
-                (cand, ts, engine, parents),
+                "INSERT OR IGNORE INTO words (word, pos, zipf, source, created_at, engine, parents, operator) "
+                "VALUES (?, 'n', 3.0, 'coined', ?, ?, ?, ?)",
+                (cand, ts, engine, parents, op or None),
             )
         conn.commit()
 
@@ -675,7 +957,7 @@ def _llm_endpoint(backend: str | None, coin_model: str | None, model_override: s
     """(api_url, api_key, model) for the LLM coining engine."""
     if backend in ("local", "lmstudio") or (not backend and not config.secret(config.OPENROUTER_KEY_ENV)):
         return "http://localhost:1234/v1", "lm-studio", coin_model or model_override or "qwen3-4b-instruct-2507"
-    return None, None, coin_model or config.COIN_MODEL
+    return config.GEN_URL, config.secret(config.GEN_KEY_ENV), coin_model or config.COIN_MODEL
 
 
 def _llm_pairs(ranked, count, half_life, min_len, max_len, db_path, url, key, model,
@@ -892,9 +1174,9 @@ def run_continuous_loop(
                 print(f"[Cycle {cycle}] Scored {len(scored)} | checking domains for top {len(to_check)} in background")
 
             console.print_score_grid(
-                [(r["word"], r["composite"], r["engine"] == "llm") for r in scored],
+                [(r["word"], r["composite"], r["engine"]) for r in scored],
                 title=f"Cycle {cycle}: {len(scored)} scored",
-                top_checked=len(to_check),
+                checked=set(to_check),
             )
             print("-" * 70)
 

@@ -106,10 +106,15 @@ def build_user_prompt(
     best: Sequence[str], worst: Sequence[str], rejected: Sequence[str],
     existing: dict[str, list[str]] | None = None,
     near: Sequence[str] = (),
+    glosses: dict[str, str] | None = None,
 ) -> str:
+    glosses = glosses or {}
+    shown = [f"{p} ({glosses[p]})" if p in glosses else p for p in parents]
     lines = [
-        f"Parents: {', '.join(parents)}",
+        f"Parents: {', '.join(shown)}",
         "",
+        *(["A meaning in parentheses says what a rare or foreign parent means: build from that meaning and from the "
+           "parent's own roots, not from a guess at its spelling."] if glosses else []),
         f"For each parent invent {per_parent} different candidate names, {min_len} to {max_len} letters, "
         "lowercase letters only.",
         f"Real-world style anchors (do not output these): {STYLE_ANCHORS}.",
@@ -161,7 +166,7 @@ async def _ask(http, url: str, headers: dict, model: str, system: str, user: str
             await asyncio.sleep(wait_s)
             continue
         if r.status_code == 429:
-            await asyncio.sleep(net.backoff_delay(attempt, r.headers.get("retry-after")))
+            await asyncio.sleep(net.llm_backoff_delay(attempt, r.headers.get("retry-after")))
             continue
         if r.status_code >= 500:
             await asyncio.sleep(min(60.0, 3.0 * (2 ** attempt)))
@@ -197,6 +202,7 @@ async def _propose(
     existing: dict[str, list[str]] | None = None,
     near: Sequence[str] = (),
     bar: Any = None,
+    glosses: dict[str, str] | None = None,
 ) -> list[tuple[str, str]]:
     """Run the proposal requests concurrently. Returns raw (name, parent) pairs.
 
@@ -208,7 +214,8 @@ async def _propose(
 
     async with net.async_client(timeout=120.0) as http:
         async def one(chunk: list[str]) -> None:
-            user = build_user_prompt(chunk, per_parent, min_len, max_len, best, worst, rejected, existing, near)
+            user = build_user_prompt(chunk, per_parent, min_len, max_len, best, worst, rejected, existing, near,
+                                     glosses)
             async with sem:
                 parsed = await _ask(http, url, headers, model, system, user, temperature)
             for item in parsed or []:
@@ -258,8 +265,8 @@ def llm_batch(
     """Ask the LLM for `count` new, gate-approved names and register them. Returns (name, parent) pairs."""
     if count <= 0 or not ranked_words or budget.exhausted():
         return []
-    url = api_url or config.OPENROUTER_URL
-    key = api_key or config.secret(config.OPENROUTER_KEY_ENV)
+    url = api_url or config.GEN_URL
+    key = api_key or config.secret(config.GEN_KEY_ENV)
     model = model or config.COIN_MODEL
     per_parent = config.COIN_LLM_PER_NAME_COUNT
     system = config.load_prompt("coin_prompt.md", DEFAULT_COIN_PROMPT)
@@ -297,13 +304,14 @@ def llm_batch(
         near = coin.NearIndex.load(conn, qv)
         best, worst = feedback_examples(conn, qv, config.COIN_LLM_FEEDBACK, focus=focus)
         existing = parent_best(conn, qv, sorted({p for c in chunks for p in c})) if focus else None
+        glosses = db.glosses(conn, sorted({p for c in chunks for p in c}))
 
     with console.RichBar(f"LLM coining ({model.split('/')[-1]})", total=len(chunks),
                          unit="request", style="magenta") as bar:
         raw = asyncio.run(_propose(
             chunks, url, key, model, system, per_parent, min_len, max_len,
             best, worst, list(_RECENT_REJECTS), config.COIN_LLM_TEMPERATURE, concurrency, existing,
-            list(_RECENT_NEAR), bar,
+            list(_RECENT_NEAR), bar, glosses,
         ))
 
     # shuffle first so the near-duplicate check does not always favour the first request's names

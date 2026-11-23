@@ -92,6 +92,9 @@ Scoring Examples:
     p2.add_argument("--mode", choices=["auto", "root", "brand"], default="auto",
                     help="scoring mode: 'root' for base conceptual potency, 'brand' for standalone names (default: auto)")
     p2.add_argument("--max-cost", type=float, default=None, help=_MAX_COST_HELP)
+    p2.add_argument("--lexicon", choices=["reinstated", "jargon", "foreign", "rare"], default=None,
+                    help="score only this extra word layer (from `namefinder lexicon`), best-first; "
+                         "--limit then takes the first N of it")
     p2.add_argument("--clear", action="store_true",
                     help="back up the database, then delete all scores and coined words (no re-scoring)")
     p2.add_argument("--free-domains-only", action="store_true",
@@ -390,6 +393,48 @@ Examples:
                          help="count only names with an LLM pronunciation review (what the coin loop uses "
                               "when BASE_SPOKEN_ONLY is on)")
 
+    p_lex = sub.add_parser(
+        "lexicon",
+        help="add extra base-word layers (dropped abstract nouns, technical jargon) to the dictionary",
+    )
+    _add_common(p_lex)
+    p_lex.add_argument("--layers", default="reinstated,jargon,foreign",
+                       help="comma list of: reinstated, jargon, foreign, rare (default: %(default)s)")
+    p_lex.add_argument("--languages", default=None,
+                       help="foreign layer: comma list of OMW codes (default: ita,fra,spa,por,ron,cat,nld,swe,dan,nob,isl)")
+    p_lex.add_argument("--min-languages", type=int, default=None,
+                       help="foreign layer: a word must be common in at least this many languages "
+                            "(default: 2; 1 adds a large, noisy tail)")
+    p_lex.add_argument("--dry-run", action="store_true",
+                       help="show counts and samples without writing anything")
+
+    p_engines = sub.add_parser(
+        "engines",
+        help="tail rate per coining engine, or the lift of name features (ending, start, length)",
+    )
+    _add_common(p_engines)
+    p_engines.add_argument("--lift", choices=["ending", "last", "start", "length"], default=None,
+                           help="show tail-rate lift by this name feature instead of the engine table")
+    p_engines.add_argument("--threshold", type=float, default=None,
+                           help="pin the tail threshold (a composite) so runs stay comparable "
+                                "(default: the current top-5%% of coined composites)")
+    p_engines.add_argument("--by", choices=["operator", "layer"], default=None,
+                           help="break the tail rate down by how names were built (engine:operator, recorded since "
+                                "operators were tracked) or by the layer of the base word (core, reinstated, "
+                                "jargon, foreign); --engine and --since apply")
+    p_engines.add_argument("--engine", default=None, metavar="NAME",
+                           help="--lift: analyse one engine only (suffix, trunc, portmanteau, vowel, llm, ...); "
+                                "the tail threshold stays global, 'base' is that engine's own tail rate")
+    p_engines.add_argument("--since", default="all", metavar="AGE",
+                           help="count only names coined within this age (like 2h, 1d; default: all). "
+                                "Cumulative tables hide recent changes under thousands of old names")
+    p_engines.add_argument("--min-names", type=int, default=200,
+                           help="--lift: hide feature values seen fewer times than this (default: %(default)s)")
+    p_engines.add_argument("--top", "-n", dest="top_count", type=int, default=15,
+                           help="--lift: rows shown at each end (default: %(default)s)")
+    p_engines.add_argument("--spoken", action="store_true",
+                           help="count only names with an LLM pronunciation review")
+
     p_coin = sub.add_parser(
         "coin",
         help="programmatically generate and clear novel brand variations",
@@ -610,6 +655,44 @@ def cmd_bases(db_path, limit: int = 30, sort: str = "rate", min_names: int = 0, 
     )
 
 
+def cmd_engines(db_path, lift: str | None, threshold: float | None, min_names: int, top: int, spoken_only: bool,
+                since: str = "all", engine: str | None = None, by: str | None = None) -> None:
+    from . import engines
+    qv = config.QUESTION_VERSION
+    window = _parse_age(since)
+    if window is None:
+        raise SystemExit("--since: use an age like 2h or 1d, or 'all'")
+    if since.strip().lower() in ("all", "ever", "forever"):
+        window = None
+    note = (" (pronunciation-reviewed names only)" if spoken_only else "") + (f", coined in the last {since}" if window else "")
+    with db.session(db_path) as conn:
+        if by:
+            rows, thr = engines.breakdown_table(conn, qv, by, threshold, spoken_only, window, engine,
+                                                min_names=min(min_names, 10))
+            if not rows:
+                print(f"\n{console.yellow('No scored names with this breakdown yet (operators are recorded for new names only).')}\n")
+                return
+            console.print_engine_table(rows, thr, label=by, title=f"Tail rate by {by}{note}")
+            return
+        if lift:
+            rows, base, thr = engines.lift_table(conn, qv, lift, threshold, min_names, spoken_only, engine, window)
+            if not rows:
+                print(f"\n{console.yellow('No scored coined names to analyse yet.')}\n")
+                return
+            shown = rows[:top] + ([] if len(rows) <= 2 * top else rows[-top:])
+            console.print_lift_table(
+                shown, base, lift,
+                title=f"Tail-rate lift by {lift}{note}: tail = composite >= {thr:.3f} "
+                      f"(best {min(top, len(rows))} and worst {max(0, min(top, len(rows) - top))})",
+            )
+            return
+        rows, thr = engines.engine_table(conn, qv, threshold, spoken_only, window)
+    if not rows:
+        print(f"\n{console.yellow('No scored coined names yet.')}\n")
+        return
+    console.print_engine_table(rows, thr, title=f"Coining engines{note}: share of names in the tail")
+
+
 def cmd_status(db_path) -> None:
     with db.session(db_path) as conn:
         def one(sql, *args):
@@ -686,7 +769,7 @@ def main(argv: list[str] | None = None) -> int:
             score.run(limit=args.limit, top_n=args.top_n, refresh=args.refresh,
                       concurrency=args.concurrency, model=args.model, db_path=args.db,
                       sample=args.sample, backend=args.backend, free_domains_only=free_doms,
-                      clear_only=clear_flag, mode=getattr(args, "mode", "auto"))
+                      clear_only=clear_flag, mode=getattr(args, "mode", "auto"), lexicon=args.lexicon)
         elif args.cmd == "check-domains":
             from . import domains
             domains.run(limit=args.limit, refresh=args.refresh, db_path=args.db, top_n=args.top_n)
@@ -749,6 +832,20 @@ def main(argv: list[str] | None = None) -> int:
         elif args.cmd == "bases":
             cmd_bases(args.db, limit=args.top_count, sort=args.sort, min_names=args.min_names,
                       spoken_only=args.spoken)
+        elif args.cmd == "lexicon":
+            from . import lexicon
+            layers = tuple(x.strip() for x in args.layers.split(",") if x.strip())
+            bad = [x for x in layers if x not in lexicon.LAYERS]
+            if bad:
+                raise SystemExit(f"--layers: unknown {', '.join(bad)} (choose from {', '.join(lexicon.LAYERS)})")
+            langs = tuple(x.strip() for x in args.languages.split(",") if x.strip()) if args.languages else None
+            unknown = [x for x in (langs or ()) if x not in config.LEXICON_LANGUAGES]
+            if unknown:
+                raise SystemExit(f"--languages: unknown {', '.join(unknown)} (choose from {', '.join(config.LEXICON_LANGUAGES)})")
+            lexicon.run(layers, dry_run=args.dry_run, limit=args.limit, db_path=args.db,
+                        languages=langs, min_languages=args.min_languages)
+        elif args.cmd == "engines":
+            cmd_engines(args.db, args.lift, args.threshold, args.min_names, args.top_count, args.spoken, args.since, args.engine, args.by)
         elif args.cmd == "coin":
             from . import coin
             bases_list = [b.strip() for b in args.bases.split(",")] if args.bases else None
