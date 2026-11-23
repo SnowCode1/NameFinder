@@ -178,16 +178,78 @@ def badge_trademark(status: str | None) -> str:
     return f"[bold yellow]{status}[/]"
 
 
+def _tld_cells(domain_state: str | None) -> str:
+    """Compact per-TLD status: green = free, red = taken, dim = unknown. One short token per TLD."""
+    if not domain_state or domain_state == "not checked":
+        return "[dim]?[/]"
+    parts = []
+    for t in sorted(domain_state.replace(",", " ").split()):
+        sep = ":" if ":" in t else ("=" if "=" in t else None)
+        if not sep:
+            continue
+        tld, status = t.split(sep, 1)
+        s = status.lower()
+        if s in ("available", "free"):
+            parts.append(f"[bold green]{tld}[/]")
+        elif s in ("registered", "taken"):
+            parts.append(f"[red]{tld}[/]")
+        else:
+            parts.append(f"[dim]{tld}?[/]")
+    return " ".join(parts) or "[dim]?[/]"
+
+
+def _tm_cell(status: str | None) -> str:
+    """One-glyph trademark verdict."""
+    st = (status or "").lower()
+    if not st or st == "not checked":
+        return "[dim]·[/]"
+    if "clear" in st:
+        return "[green]✓[/]"
+    if "conflict" in st or "taken" in st:
+        return "[bold red]✗[/]"
+    return "[yellow]![/]"
+
+
+def _reason_text(r: dict[str, Any], detail: bool) -> str:
+    """The judge's reason. One short line by default; with `detail`, the risks and mishearing too."""
+    why = r.get("why") or ""
+    if not detail:
+        return why or "[dim]-[/]"
+    why_not = r.get("why_not") or ""
+    misheard = r.get("misheard_as")
+    if misheard:
+        why_not = f"{why_not}; may sound like: {misheard}" if why_not else f"may sound like: {misheard}"
+    if why and why_not:
+        return f"{why} [dim][Risk: {why_not}][/]"
+    return why or (f"[dim][Risk: {why_not}][/]" if why_not else "[dim]-[/]")
+
+
+def _add_rank_name_columns(t: Table) -> None:
+    """The leading `#` and `Name` columns shared by every ranking table."""
+    t.add_column("#", justify="right", style="bold cyan", no_wrap=True, min_width=3)
+    t.add_column("Name", no_wrap=True, min_width=14)
+
+
 def build_rich_table(
     rows: Sequence[sqlite3.Row | dict[str, Any]],
     title: str = "Top Candidates",
     limit: int = 10,
     show_domains: bool = True,
     show_reasoning: bool = True,
+    detail: bool = False,
+    show_say: bool = False,
 ) -> Table:
-    """Construct an auto-expanding rich Table that fills the full terminal width."""
+    """Compact leaderboard: one line per row, the reason column takes the leftover width.
+
+    Narrow terminals drop the sub-scores (under 120 columns) and the reason (under 90).
+    `detail` wraps the full reason with risks; `show_say` adds the pronunciation next to the name.
+    """
     items = list(rows)[:limit]
+    width = _console.width
     show_elo = any(dict(i).get("elo") is not None for i in items)
+    show_parts = width >= 120
+    show_reasoning = show_reasoning and width >= 90
+    show_tm = any(dict(i).get("trademark") not in (None, "not checked") for i in items)
     t = Table(
         title=f"[bold cyan]{title}[/]",
         box=box.ROUNDED,
@@ -197,79 +259,53 @@ def build_rich_table(
         border_style="dim",
     )
 
-    t.add_column("#", justify="right", style="bold cyan", no_wrap=True, min_width=3)
-    t.add_column("Candidate", style="bold white", no_wrap=True, min_width=16)
-    t.add_column("Score", justify="center", no_wrap=True, min_width=7)
-    t.add_column("Fit", justify="center", no_wrap=True, min_width=5)
-    t.add_column("Nat", justify="center", no_wrap=True, min_width=5)
-    t.add_column("Verb", justify="center", no_wrap=True, min_width=5)
+    _add_rank_name_columns(t)
+    t.add_column("Score", justify="right", no_wrap=True, min_width=5)
     if show_elo:
-        t.add_column("Elo", justify="center", no_wrap=True, min_width=9)
-
+        t.add_column("Elo", justify="right", no_wrap=True, min_width=9)
+    if show_parts:
+        t.add_column("Fit·Nat·Verb", justify="center", no_wrap=True, min_width=12)
     if show_domains:
-        t.add_column("Domains", no_wrap=True, min_width=25)
+        t.add_column("Domains", no_wrap=True, min_width=7)
+    if show_tm:
+        t.add_column("TM", justify="center", no_wrap=True, min_width=2)
     if show_reasoning:
-        t.add_column("Reasoning & Brand Fit", style="italic", min_width=20)
+        if detail:
+            t.add_column("Reasoning & Brand Fit", style="italic", ratio=1, min_width=20)
+        else:
+            t.add_column("Why", style="italic", ratio=1, min_width=20, no_wrap=True, overflow="ellipsis")
+
+    def part(v: float | None) -> str:
+        return f"{v:.2f}".lstrip("0") if v is not None else "-"
 
     for i, item in enumerate(items, 1):
         r = dict(item) if hasattr(item, "keys") else item
         word = r["word"]
-        comp = r.get("composite", 0.0) or 0.0
-        fit = r.get("fit", 0.0) or 0.0
-        nat = r.get("natural", 0.0) or 0.0
-
-        score_text = badge_score(comp)
-        fit_text = f"{fit:.2f}"
-        nat_text = f"{nat:.2f}"
-        verb = r.get("verbable")
-        verb_text = f"{verb:.2f}" if verb is not None else "[dim]-[/]"
-
-        sound = r.get("say_aloud") or r.get("syllables")
-        cand_cell = f"[bold white]{word}[/]"
+        name = f"[bold white]{word}[/]"
         if r.get("refined"):
-            cand_cell += " [bold green]✓[/]"
+            name += " [bold green]✓[/]"
         fresh = r.get("fresh")
         if fresh == "new":
-            cand_cell += " [bold black on yellow] NEW [/]"
+            name += " [black on yellow]N[/]"
         elif fresh == "refined":
-            cand_cell += " [bold black on cyan] REF [/]"
-        if sound and sound != word:
-            cand_cell += f"\n[dim]{sound}[/]"
-        row_cells = [
-            str(i),
-            cand_cell,
-            score_text,
-            fit_text,
-            nat_text,
-            verb_text,
-        ]
+            name += " [black on cyan]R[/]"
+        sound = r.get("say_aloud") or r.get("syllables")
+        if show_say and sound and sound != word:
+            name += f" [dim]{sound}[/]"
+
+        cells = [str(i), name, badge_score(r.get("composite", 0.0) or 0.0)]
         if show_elo:
             elo = r.get("elo")
-            row_cells.append(
-                f"[bold cyan]{elo:.0f}[/] [dim]#{r['elo_rank']}[/]" if elo is not None else "[dim]-[/]"
-            )
-
+            cells.append(f"[bold cyan]{elo:.0f}[/] [dim]#{r['elo_rank']}[/]" if elo is not None else "[dim]-[/]")
+        if show_parts:
+            cells.append(f"{part(r.get('fit'))}  {part(r.get('natural'))}  {part(r.get('verbable'))}")
         if show_domains:
-            dom_text = format_domain_summary(r.get("domains") or r.get("domain_state"))
-            row_cells.append(dom_text)
-
+            cells.append(_tld_cells(r.get("domains") or r.get("domain_state")))
+        if show_tm:
+            cells.append(_tm_cell(r.get("trademark")))
         if show_reasoning:
-            why = r.get("why") or ""
-            why_not = r.get("why_not") or ""
-            misheard = r.get("misheard_as")
-            if misheard:
-                why_not = f"{why_not}; may sound like: {misheard}" if why_not else f"may sound like: {misheard}"
-            if why and why_not:
-                reason = f"{why} [dim][Risk: {why_not}][/]"
-            elif why:
-                reason = why
-            elif why_not:
-                reason = f"[dim][Risk: {why_not}][/]"
-            else:
-                reason = "[dim]-[/]"
-            row_cells.append(reason)
-
-        t.add_row(*row_cells)
+            cells.append(_reason_text(r, detail))
+        t.add_row(*cells)
 
     return t
 
@@ -280,6 +316,8 @@ def print_leaderboard(
     limit: int = 10,
     show_domains: bool = True,
     show_reasoning: bool = True,
+    detail: bool = False,
+    show_say: bool = False,
 ) -> None:
     """Print an auto-expanding leaderboard table."""
     if not rows:
@@ -290,6 +328,8 @@ def print_leaderboard(
         limit=limit,
         show_domains=show_domains,
         show_reasoning=show_reasoning,
+        detail=detail,
+        show_say=show_say,
     )
     _console.print(t)
 
@@ -609,8 +649,7 @@ def build_tournament_table(
         border_style="dim",
         caption_style="dim",
     )
-    t.add_column("#", justify="right", style="bold cyan", no_wrap=True, min_width=3)
-    t.add_column("Name", no_wrap=True, min_width=14)
+    _add_rank_name_columns(t)
     show_origin = any(r.get("origin") not in (None, "old") for r in items)
     if show_origin:
         t.add_column("Src", no_wrap=True, min_width=5)

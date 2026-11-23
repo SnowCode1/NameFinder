@@ -298,6 +298,8 @@ namefinder rank-final --refresh
 | `--all-free` | `top` | Only candidates whose every checked domain is free (words with no domain check are excluded) |
 | `--clean` | `top` | Filter display to candidates clear of trademark conflicts |
 | `--spoken` | `top` | Only names with an LLM pronunciation review (spelled out by brand scoring or `refine`); hides older rows judged by code-side phonetics alone |
+| `--why` | `top` | Wrap the full reasoning with risks and mishearings (default: one short line per name) |
+| `--say` | `top` | Show the say-aloud pronunciation next to each name |
 | `--bases-only` | `top` | Hide coined names; show dictionary base words only |
 | `--since AGE` | `top` | Mark names scored within the window with a yellow `NEW` and names refined within it with a cyan `REF` (units `s`, `m`, `h`, `d`, `w`, combinable and spellable in full: `30s`, `10m`, `1h30m`, `6h`, `2d`, `1w`, `"2 days"`; a bare number is minutes; `all` marks everything; default `10m` (`TOP_SINCE` in `config.py`); `0`/`off` turns marks off). Names refined before this feature existed carry no timestamp, so they are never marked `REF` |
 | `--new` | `top` | Show only names marked `NEW` or `REF`; combine with `-n` and the other filters |

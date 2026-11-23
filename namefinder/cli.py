@@ -374,6 +374,10 @@ Examples:
                             "combinable and spellable in full (30s, 10m, 1h30m, 6h, 2d, 1w, '2 days'); a bare "
                             "number is minutes; 'all' marks everything, 0/off turns marking off "
                             "(default: %(default)s)")
+    p_top.add_argument("--why", dest="detail", action="store_true",
+                       help="wrap the full reasoning, with risks and mishearings (default: one short line)")
+    p_top.add_argument("--say", dest="show_say", action="store_true",
+                       help="show the say-aloud pronunciation next to each name")
     p_top.add_argument("--new", dest="new_only", action="store_true",
                        help="show only names marked NEW or REF within the --since window")
 
@@ -562,7 +566,8 @@ def _mark_fresh(items: list[dict], window: timedelta | None) -> None:
 def cmd_top(db_path, limit: int = 25, only_free: bool = False, only_clean: bool = False,
             bases_only: bool = False, all_free: bool = False,
             since: str = config.TOP_SINCE, new_only: bool = False, spoken_only: bool = False,
-            by: str = "score", judge_model: str | None = None) -> None:
+            by: str = "score", judge_model: str | None = None,
+            detail: bool = False, show_say: bool = False) -> None:
     from . import tournament
     window = _parse_age(since)
     if new_only and not window:
@@ -612,9 +617,9 @@ def cmd_top(db_path, limit: int = 25, only_free: bool = False, only_clean: bool 
             filter_desc.insert(0, f"by tournament rating, judge {judge}")
         filters_str = f" ({', '.join(filter_desc)})" if filter_desc else ""
 
-        legend = "✓ = refined"
+        legend = "✓ = refined; domains: green = free, red = taken; TM: ✓ clear, ✗ conflict, ! watch"
         if window:
-            legend += f", NEW/REF = scored/refined in last {since}: {n_new} new, {n_ref} refined"
+            legend += f", N/R = scored/refined in last {since}: {n_new} new, {n_ref} refined"
         title = f"NameFinder Rankings: Top {len(items)}{filters_str}  ({legend})"
         if not items:
             print(f"\n{console.yellow('No candidates match the specified criteria.')}")
@@ -627,6 +632,8 @@ def cmd_top(db_path, limit: int = 25, only_free: bool = False, only_clean: bool 
             limit=limit,
             show_domains=True,
             show_reasoning=True,
+            detail=detail,
+            show_say=show_say,
         )
         if judge_note and (by == "tournament" or any(it["elo"] is not None for it in items[:limit])):
             print(console.dim(f"  note: {judge_note}"))
@@ -828,7 +835,7 @@ def main(argv: list[str] | None = None) -> int:
             cmd_top(args.db, limit=args.top_count, only_free=args.free_domains, only_clean=args.clean,
                     bases_only=args.bases_only, all_free=args.all_free,
                     since=args.since, new_only=args.new_only, spoken_only=args.spoken,
-                    by=args.by, judge_model=args.judge)
+                    by=args.by, judge_model=args.judge, detail=args.detail, show_say=args.show_say)
         elif args.cmd == "bases":
             cmd_bases(args.db, limit=args.top_count, sort=args.sort, min_names=args.min_names,
                       spoken_only=args.spoken)
