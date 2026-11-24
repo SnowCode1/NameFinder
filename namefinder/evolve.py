@@ -14,7 +14,7 @@ import json
 import random
 from typing import Any, Sequence
 
-from . import budget, config, console, db, ideanames, llm, net, tournament
+from . import budget, config, console, db, families, ideanames, llm, net, tournament
 
 DEFAULT_VARIANTS = 4
 PARENTS_PER_REQUEST = 4
@@ -38,6 +38,7 @@ EVOLVE_USER = """Improve these names. For each, the judge's current rating and t
 
 Invent up to {n} variants per name.
 Names already in play (do not repeat them): {taken}
+{avoid}
 For every variant add "change": at most 14 words on what you changed and which flaw it fixes.
 Return ONLY a JSON array, no prose or fences, one object per name, in order:
 {{"parent": "<name>", "variants": [{{"name": "...", "change": "..."}}]}}"""
@@ -56,6 +57,8 @@ def pick_parents(conn, judge: str, top: int, include_refs: bool, refs: Sequence[
     for w in sorted(rated, key=lambda x: rated[x]["rating"], reverse=True):
         if not include_refs and w in refs:
             continue
+        if families.banned(w):
+            continue   # a banned name has nothing worth keeping in a variant
         o = origins.get(w)
         out.append({
             "word": w, "rating": rated[w]["rating"], "flaws": flaws.get(w, []),
@@ -66,7 +69,7 @@ def pick_parents(conn, judge: str, top: int, include_refs: bool, refs: Sequence[
     return out
 
 
-async def _propose(parents, n, taken, url, key, model, system, concurrency, bar):
+async def _propose(parents, n, taken, url, key, model, system, concurrency, bar, avoid=""):
     sem = asyncio.Semaphore(max(1, concurrency))
     out: list[ideanames.Candidate] = []
     chunks = [parents[i : i + PARENTS_PER_REQUEST] for i in range(0, len(parents), PARENTS_PER_REQUEST)]
@@ -78,7 +81,8 @@ async def _propose(parents, n, taken, url, key, model, system, concurrency, bar)
                 flaw = "; ".join(p["flaws"]) if p["flaws"] else "none named (find its weakest point yourself)"
                 built = f"  [built: {p['built']}]" if p["built"] else ""
                 lines.append(f"- {p['word']} (rating {p['rating']:.0f}){built}  flaws: {flaw}")
-            user = EVOLVE_USER.format(parents="\n".join(lines), n=n, taken=", ".join(taken) or "(none)")
+            user = EVOLVE_USER.format(parents="\n".join(lines), n=n, taken=", ".join(taken) or "(none)",
+                                      avoid=avoid)
             async with sem:
                 parsed = await llm.chat_json(http, url, key, model, system, user,
                                              temperature=config.COIN_LLM_TEMPERATURE, max_tokens=4000, label="evolve")
@@ -127,6 +131,7 @@ def run(
         parents = pick_parents(conn, judge, top, include_refs, refs)
         taken = [r["word"] for r in conn.execute(
             "SELECT word FROM tournament_ratings WHERE judge = ? ORDER BY rating DESC LIMIT 60", (judge,))]
+        avoid = families.avoid_text(conn)
     if note:
         console.log(f"[evolve] note: {note}")
     if not parents:
@@ -138,7 +143,7 @@ def run(
     with console.RichBar("Evolving names", total=-(-len(parents) // PARENTS_PER_REQUEST),
                          unit="request", style="magenta") as bar:
         raw = asyncio.run(_propose(parents, variants, taken, url, key, model, system,
-                                   concurrency or config.SCORE_CONCURRENCY, bar))
+                                   concurrency or config.SCORE_CONCURRENCY, bar, avoid))
     random.shuffle(raw)
     accepted, stats = ideanames.register(raw, "variant", "variant", db_path, min_len, max_len,
                                          stem_cap_group=4, stem_cap_batch=8)

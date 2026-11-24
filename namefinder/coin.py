@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from typing import Iterable, Sequence
 
 
-from . import budget, config, console, db, domains, phonetics, score, wordlike
+from . import budget, config, console, db, domains, families, phonetics, score, wordlike
 
 PREFIXES = (
     "in", "re", "con", "syn", "per", "pro", "meta", "omni",
@@ -250,6 +250,8 @@ def acceptable(word: str, min_len: int = 5, max_len: int = 10) -> bool:
     if any(b in w for b in config.COIN_BLOCK_SUBSTRINGS):
         return False
     if any(w.startswith(e) or w.endswith(e) for e in config.COIN_BLOCK_EDGES):
+        return False
+    if families.banned(w):
         return False
     if config.COIN_MIN_WORDLIKE_PCT and not wordlike.is_wordlike(w, config.COIN_MIN_WORDLIKE_PCT):
         return False
@@ -538,6 +540,11 @@ def llm_share_multiplier(conn, qversion: str, min_each: int = 15) -> float:
     return max(0.5, min(2.0, ratio ** 2))
 
 
+def unbanned(ranked_words: Sequence[Any]) -> list[Any]:
+    """Base words that break no ban (a base like "proof" can only yield banned names)."""
+    return [r for r in ranked_words if not families.banned(r["word"] if hasattr(r, "keys") else str(r))]
+
+
 def parent_weights(ranked_words: Sequence[Any], half_life: float, bandit=None) -> list[float]:
     """Rank-based exponential falloff, boosted for verb-like parents.
 
@@ -655,7 +662,7 @@ def load_winners(conn, qversion: str, focus: Sequence[str] | None = None, n: int
         """,
         (qversion, n * 4 if focus else n),
     ).fetchall()
-    out = [(r["word"], r["parents"].split(",")[0]) for r in rows]
+    out = [(r["word"], r["parents"].split(",")[0]) for r in rows if not families.banned(r["word"])]
     if focus:
         keep = set(focus)
         out = [t for t in out if t[1] in keep][:n]
@@ -895,6 +902,7 @@ def coin_stream_batch(
     bandit=None,
 ) -> list[tuple[str, str]]:
     """Sample batch_size novel variations, where each variation is its own independent base sample."""
+    ranked_words = unbanned(ranked_words)
     weights = parent_weights(ranked_words, half_life, bandit)
     focus_w = [bandit.factor(f) for f in focus] if (focus and bandit) else None
     with db.session(db_path) as conn:
@@ -903,6 +911,7 @@ def coin_stream_batch(
         known = {r[0] for r in conn.execute("SELECT word FROM words")}
         near = NearIndex.load(conn, config.QUESTION_VERSION)
         winners = load_winners(conn, config.QUESTION_VERSION, focus)
+        gate = families.Gate(conn)
     engine_w, partner_w = learned
     pairs: list[tuple[str, str]] = []
     provenance: dict[str, tuple[str, str, str]] = {}
@@ -918,13 +927,17 @@ def coin_stream_batch(
         )
         if res:
             cand, base, engine, other, op = res
-            if cand not in seen and cand not in known and near.admit(cand):
-                seen.add(cand)
+            if cand in seen or cand in known:
+                continue
+            seen.add(cand)
+            if gate.check(cand, (base, other) if other else (base,)).ok and near.admit(cand):
                 pairs.append((cand, base))
                 provenance[cand] = (engine, f"{base},{other}" if other else base, op)
 
     if near.dropped:
         print(f"[coin] rule engines: {near.dropped} near-duplicates of weaker names dropped")
+    if gate.dropped:
+        print(f"[coin] rule engines: dropped {gate.summary()}")
     if not pairs:
         return []
 
@@ -960,15 +973,36 @@ def _llm_endpoint(backend: str | None, coin_model: str | None, model_override: s
     return config.GEN_URL, config.secret(config.GEN_KEY_ENV), coin_model or config.COIN_MODEL
 
 
+def load_idea_seeds(db_path, share: float) -> dict[str, tuple[int, str]]:
+    """Base words retrieved by meaning for the approved ideas ({} when off or unavailable)."""
+    if share <= 0:
+        return {}
+    try:
+        from . import embed
+        with db.session(db_path) as conn:
+            seeds = embed.idea_seeds(conn)
+    except SystemExit as exc:          # no key for the embeddings endpoint
+        print(f"[seeds] idea seeds off: {exc}")
+        return {}
+    except Exception as exc:
+        print(f"[seeds] idea seeds off this run: {exc.__class__.__name__}: {exc}")
+        return {}
+    if seeds:
+        n_ideas = len({v[0] for v in seeds.values()})
+        print(f"[seeds] {share:.0%} of LLM parents come from {len(seeds)} base words retrieved for {n_ideas} ideas")
+    return seeds
+
+
 def _llm_pairs(ranked, count, half_life, min_len, max_len, db_path, url, key, model,
-               focus=None, concurrency: int = 3, bandit=None) -> list[tuple[str, str]]:
+               focus=None, concurrency: int = 3, bandit=None, seeds=None, seed_share: float = 0.0,
+               ) -> list[tuple[str, str]]:
     """LLM-coined (name, parent) pairs; a failure here must never stop the coining loop."""
     from . import llmcoin
     try:
         pairs = llmcoin.llm_batch(
             ranked, count, half_life=half_life, min_len=min_len, max_len=max_len,
             db_path=db_path, api_url=url, api_key=key, model=model, focus=focus,
-            concurrency=concurrency, bandit=bandit,
+            concurrency=concurrency, bandit=bandit, seeds=seeds, seed_share=seed_share,
         )
     except Exception as exc:
         print(f"[llm-coin] skipped this cycle: {exc.__class__.__name__}: {exc}")
@@ -1013,6 +1047,7 @@ def run_continuous_loop(
     llm_share: float | None = None,
     coin_model: str | None = None,
     focus: Sequence[str] | None = None,
+    idea_share: float | None = None,
 ) -> None:
     """Continuously coin names, score them all, and domain-check the best slice in the background.
 
@@ -1051,6 +1086,11 @@ def run_continuous_loop(
     llm_url, llm_key, llm_model = _llm_endpoint(backend, coin_model, model_override)
     if llm_share > 0:
         print(f"LLM coining: {llm_share:.0%} of each cycle ({llm_model})")
+    idea_share = config.COIN_IDEA_SHARE if idea_share is None else idea_share
+    seeds = load_idea_seeds(db_path, idea_share) if (llm_share > 0 and not focus) else {}
+    banned_focus = [f for f in (focus or []) if families.banned(f)]
+    if banned_focus:
+        print(f"[coin] warning: {', '.join(banned_focus)} break a ban (config.BANNED_*); names built on them are dropped")
     print("Press Ctrl+C anytime to stop.\n")
 
     cycle = 0
@@ -1125,7 +1165,7 @@ def run_continuous_loop(
             if llm_n:
                 novel_pairs += _llm_pairs(
                     ranked, llm_n, half_life, min_len, max_len, db_path, llm_url, llm_key, llm_model,
-                    focus=focus, concurrency=concurrency, bandit=bandit,
+                    focus=focus, concurrency=concurrency, bandit=bandit, seeds=seeds, seed_share=idea_share,
                 )
             if not novel_pairs:
                 print(f"[Cycle {cycle}] Retrying candidate generation...")
@@ -1207,6 +1247,7 @@ def run(
     concurrency: int = config.COIN_CONCURRENCY,
     llm_share: float | None = None,
     coin_model: str | None = None,
+    idea_share: float | None = None,
 ) -> list[str]:
     """Main CLI entrypoint for namefinder coin."""
     if continuous:
@@ -1223,6 +1264,7 @@ def run(
             concurrency=concurrency,
             llm_share=llm_share,
             coin_model=coin_model,
+            idea_share=idea_share,
         )
         return []
 
@@ -1254,8 +1296,9 @@ def run(
                 backend = "openrouter" if config.secret(config.OPENROUTER_KEY_ENV) else "local"
             url, key, lmodel = _llm_endpoint(backend, coin_model, model_override)
             print(f"Asking {lmodel} for {llm_n} LLM-coined names...")
+            ishare = config.COIN_IDEA_SHARE if idea_share is None else idea_share
             pairs += _llm_pairs(ranked, llm_n, half_life, min_len, max_len, db_path, url, key, lmodel,
-                                bandit=bandit)
+                                bandit=bandit, seeds=load_idea_seeds(db_path, ishare), seed_share=ishare)
         novel_words = [p[0] for p in pairs]
 
     if limit and len(novel_words) > limit:

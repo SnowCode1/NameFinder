@@ -184,17 +184,19 @@ JEV_TOP_N = SCORE_TOP_N
 # Composite = weighted sum of Noul probabilities, then multiplied by the
 # cleanliness gate. Retune freely - it is pure code, no re-scoring needed.
 WEIGHTS = {
-    "fit": 0.30,        # evokes discovery / tracing / quiet utility
-    "natural": 0.20,    # reads as a real, serious word
-    "spellable": 0.15,  # written correctly after hearing it once
-    "memorable": 0.15,  # Score, normalised to 0..1
-    "novelty": 0.20,    # not already a known product / place / person name
+    "fit": 0.45,        # the overall verdict (prompts/system_prompt.md calibration)
+    "natural": 0.25,    # sounds like a real term; the ending sits on its root
+    "spellable": 0.10,  # written correctly after hearing it once
+    "memorable": 0.10,  # Score, normalised to 0..1
+    "novelty": 0.10,    # not already a known product; term-like names read as "taken" more often,
+                        # and domain/trademark checks catch real conflicts, so this weighs little
 }
 # "Verbability": does it work as a verb in "I just ___ it and found what I needed"
 # (google it, ping it, grep it)? Applied as a slight multiplicative bonus on brand
-# composites: composite *= (1 - VERB_BONUS) + VERB_BONUS * verbable (so 0.92..1.0).
-# Unrated words count as 0.5. 0 disables it.
-VERB_BONUS = 0.08
+# composites: composite *= (1 - VERB_BONUS) + VERB_BONUS * verbable. Unrated words count as 0.5.
+# Off since 2026-11-24: the rated names favour term-like nouns (vestigome, stemmagram), not verbs.
+VERB_BONUS = 0.0
+SCORE_FATAL_NEG = 0.5   # brand scoring: a name the scorer marks with a fatal flaw gets at least this "neg"
 TAKEN_DAMP = 0.75     # weight of "already a known software brand"
 COMMON_NAME_DAMP = 0.50
 
@@ -206,9 +208,9 @@ GENERIC_PREFIX_PENALTY = {   # prefix -> composite multiplier reduction
     "inter": 0.05, "syn": 0.04, "neo": 0.05, "sub": 0.04, "co": 0.04,
     "con": 0.03, "re": 0.03, "in": 0.03, "per": 0.03, "epi": 0.03,
 }
-# Brevity: spoken brand names win at one or two syllables. Composite multiplier
-# reduction by syllable count (the largest key <= the count applies). {} disables it.
-SYLLABLE_PENALTY = {3: 0.04, 4: 0.10}
+# Length: composite multiplier reduction by syllable count (the largest key <= the count applies).
+# {} disables it. The top-rated names have four syllables, so only five or more are penalised.
+SYLLABLE_PENALTY = {5: 0.10}
 # Refine pass (second pass over the top coined words)
 REFINE_MODEL = os.getenv("OPENROUTER_REFINE_MODEL") or SCORE_MODEL
 TOURNAMENT_MODEL = os.getenv("OPENROUTER_TOURNAMENT_MODEL") or SCORE_MODEL   # judge for `tournament`; ratings are kept per model
@@ -263,6 +265,41 @@ COIN_BLOCK_SUBSTRINGS = (
     "nazi", "rape", "dildo", "penis", "vagina", "sexy", "nigg",
 )
 COIN_BLOCK_EDGES = ("sex",)  # blocked only at the start or end of a word
+# Hard bans (namefinder/families.py), checked in coin.acceptable so every engine obeys them and named in every
+# generation prompt. verit/truth/proof/authent/
+# genuin: verdict words, but the tool shows a record, not a ruling on authenticity. forens/deep-: read
+# like police forensics or deepfake detection. Existing names are kept in the database; banned ones leave the tournament pool.
+# orig- was banned until 2026-11-24 and lifted: rated names such as origalia, origadex and suborigal reach B.
+BANNED_ROOTS = ("verit", "truth", "proof", "authent", "genuin", "forens")
+BANNED_PREFIXES = ("deep",)
+BANNED_ENDINGS: tuple[str, ...] = ()
+# Family saturation: a family (first 4 letters, or a known ending such as -ome) holding at least FAMILY_SHARE
+# of the best FAMILY_TOP names (and at least FAMILY_MIN of them) is overused. Generation prompts name the
+# overused families, and only FAMILY_KEEP of new names in one survive the gate.
+FAMILY_GATE = True
+FAMILY_TOP = 100
+FAMILY_SHARE = 0.06
+FAMILY_MIN = 4
+FAMILY_KEEP = 0.15
+FAMILY_POOL_SHARE = 0.04     # tournament pool: at most this share of the pool (and at least 4) per family
+# Endings never treated as overused: the scientific endings the rated taste is built on (vestigome,
+# stemmagram). Openings (vest-, stem-) still saturate, so one root cannot take over.
+FAMILY_FREE_ENDINGS = ("-ome", "-gram", "-eme", "-dex")
+# Collisions (families.collisions): spelling or sound similarity to a term in prompts/collision_terms.txt
+# (competitors, field vocabulary, well-known brands) at or above this rejects a new name.
+COLLISION_GATE = True
+COLLISION_SIM = 0.75
+# Sound-alikes (families.soundalikes): a name within one consonant step of a common English word
+# (zipf >= SOUNDALIKE_ZIPF) or a collision term (fotogram ~ photogram). Sound keys with fewer than
+# SOUNDALIKE_MIN_KEY consonant/vowel slots are not checked.
+SOUNDALIKE_GATE = True
+# Readability (phonetics.bad_ending): a name ending on a consonant run no English word ends on
+# (traceln, sourcr) has lost a vowel; it is rejected when coined and screened out of the tournament.
+READABILITY_GATE = True
+SOUNDALIKE_ZIPF = 2.5
+SOUNDALIKE_MIN_KEY = 6
+SOUNDALIKE_MAX_DIST = 0.8    # families.sound_distance: a vowel change 0.3, t/th or s/z 0.5, other edits 1
+MISSPELLING_ZIPF = 3.0       # one letter from a word this common (6+ letters) reads as a misspelling of it
 # Wordlikeness floor (namefinder/wordlike.py): reject names less wordlike than this percentile of held-out
 # real words. A safety net against gibberish only. Measured on 67k scored names, wordlikeness does not
 # predict a top score (the most wordlike decile has about half the tail rate of the least), so it is not
@@ -279,10 +316,11 @@ COIN_TRUNC_MIN_CLIP = 3      # ...and keeps at least this many letters, in whole
 COIN_COMPOUND_MAX_PART = 6   # compound engine: each whole word is at most this long
 COIN_SUFFIXES = ("ex", "um", "os", "ia", "is", "ix", "us", "on", "am", "im", "x")
 # Verb-likeness steering for the coining engines
-COIN_VERB_PARENT_BOOST = 1.0   # verb-like parents are up to (1 + boost)x as likely to be picked
-COIN_VERB_FLOOR = 0.35         # a candidate with verb_score 0 is kept with this probability (1.0 = no bias)
-COIN_VERB_SPLICE_WEIGHT = 0.30  # weight of verb_score when choosing among splice options
-COIN_LEARN_VERB = 1.0          # engine learning scales a composite by 1 + this * (verbable - 0.5)
+# All neutral since 2026-11-24 (the rated taste does not reward verb-like names); old values 1.0, 0.35, 0.30, 1.0.
+COIN_VERB_PARENT_BOOST = 0.0   # verb-like parents are up to (1 + boost)x as likely to be picked
+COIN_VERB_FLOOR = 1.0          # a candidate with verb_score 0 is kept with this probability (1.0 = no bias)
+COIN_VERB_SPLICE_WEIGHT = 0.0  # weight of verb_score when choosing among splice options
+COIN_LEARN_VERB = 0.0          # engine learning scales a composite by 1 + this * (verbable - 0.5)
 COIN_LEARN_PRIOR = 10        # pseudo-observations pulling per-engine/partner means toward the overall mean
 COIN_EXPLORE = 0.30          # share of engine sampling kept uniform so no engine is starved
 # LLM coining engine (namefinder/llmcoin.py)
@@ -293,6 +331,10 @@ COIN_LLM_PARENTS_PER_REQUEST = 6
 COIN_LLM_FOCUS_PER_NAME_COUNT = 16  # names requested per parent when the loop is focused on a few roots
 COIN_LLM_TEMPERATURE = 0.9
 COIN_LLM_FEEDBACK = 6          # best/worst earlier LLM names shown to the model as style feedback
+# Idea seeds (namefinder/embed.py): this share of the LLM engine's parents are base words retrieved by meaning
+# for an approved idea, shown to the model with that idea. 0 disables. Needs `namefinder embed` once
+# (the coin loop also builds missing vectors itself).
+COIN_IDEA_SHARE = 0.5
 COIN_NEAR_DUP = True                 # reject coined names one letter from an existing coined name...
 COIN_NEAR_DUP_KEEP_QUANTILE = 0.95   # ...unless that name scored in the top 5% (variations on winners stay)
 COIN_BATCH = 120            # coined words per continuous cycle
@@ -375,6 +417,24 @@ def openrouter_extras(url: str) -> dict:
         extras["provider"] = {"sort": OPENROUTER_SORT}
     return extras
 
+
+# Meaning embeddings (namefinder/embed.py): any OpenAI-compatible /embeddings endpoint; OpenRouter serves
+# openai/text-embedding-3-small at about $0.02 per million tokens (every base word once: well under a cent).
+EMBED_URL = (os.getenv("NAMEFINDER_EMBED_URL") or OPENROUTER_URL).rstrip("/")
+EMBED_KEY_ENV = os.getenv("NAMEFINDER_EMBED_KEY_ENV") or OPENROUTER_KEY_ENV
+EMBED_MODEL = os.getenv("NAMEFINDER_EMBED_MODEL") or "openai/text-embedding-3-small"
+EMBED_BATCH = 200            # texts per request
+EMBED_CONCURRENCY = 6
+EMBED_SEEDS_PER_IDEA = 12    # base words retrieved per approved idea
+# Retrieval and obliqueness subtract this much of a text's similarity to the category anchors, so a base
+# that hints at an idea ("trail" for "every copy back to the first upload") beats one that names the category ("photo").
+# 0.5 until 2026-11-24; lowered because the rated taste accepts literal structure roots (stemma, vestigium, orig-).
+EMBED_CATEGORY_WEIGHT = 0.2
+# What the product literally is. A name close to these describes the category instead of hinting at it.
+EMBED_CATEGORY_ANCHORS = (
+    "photo", "image verification", "fact-checking", "fake image detection", "reverse image search",
+    "photo forensics", "metadata", "proof of authenticity", "deepfake",
+)
 
 # Per-command spend cap in USD for paid API calls (0 disables). Override with --max-cost.
 MAX_COST = float(os.getenv("NAMEFINDER_MAX_COST", "1.0"))

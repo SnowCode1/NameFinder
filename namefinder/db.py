@@ -157,6 +157,15 @@ CREATE TABLE IF NOT EXISTS ideas (
     created_at TEXT
 );
 
+-- Meaning embeddings (namefinder/embed.py), unit-normalised float32, keyed by the exact text embedded.
+CREATE TABLE IF NOT EXISTS embeddings (
+    text       TEXT NOT NULL,
+    model      TEXT NOT NULL,
+    vec        BLOB NOT NULL,
+    created_at TEXT,
+    PRIMARY KEY (text, model)
+);
+
 -- Where a generated name came from (kind: idea | variant) and how it was built.
 CREATE TABLE IF NOT EXISTS name_origins (
     word         TEXT PRIMARY KEY,

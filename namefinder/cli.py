@@ -236,6 +236,9 @@ Names stop playing once they are clearly below the 100th best (--prune-rank, --z
                         help="names per judged group (default: %(default)s; measured cheaper per comparison than 5)")
     p_tour.add_argument("--refit", action="store_true",
                         help="refit the ratings from the stored matches (no API calls), then show the ranking")
+    p_tour.add_argument("--no-screen", action="store_true",
+                        help="keep banned names, sound-alikes, reference-term collisions and names over the "
+                             "per-family cap in the pool (screened out by default)")
     p_tour.add_argument("--carry", type=int, default=60,
                         help="with --source ideas: how many of the best-rated names to carry in (default: %(default)s)")
 
@@ -417,8 +420,9 @@ Examples:
         help="tail rate per coining engine, or the lift of name features (ending, start, length)",
     )
     _add_common(p_engines)
-    p_engines.add_argument("--lift", choices=["ending", "last", "start", "length"], default=None,
-                           help="show tail-rate lift by this name feature instead of the engine table")
+    p_engines.add_argument("--lift", choices=["ending", "last", "start", "length", "tail", "head"], default=None,
+                           help="show tail-rate lift by this name feature instead of the engine table "
+                                "(tail/head: name families as in `namefinder families`)")
     p_engines.add_argument("--threshold", type=float, default=None,
                            help="pin the tail threshold (a composite) so runs stay comparable "
                                 "(default: the current top-5%% of coined composites)")
@@ -484,6 +488,9 @@ Coining Examples:
     p_coin.add_argument("--model", default=None, help="model id override for scoring coined words")
     p_coin.add_argument("--llm-share", type=float, default=config.COIN_LLM_SHARE,
                         help="fraction of each batch invented by the LLM engine; 0 disables (default: %(default)s)")
+    p_coin.add_argument("--idea-share", type=float, default=config.COIN_IDEA_SHARE,
+                        help="share of the LLM engine's parents retrieved by meaning for your approved ideas, each "
+                             "shown with its idea (needs embeddings; 0 disables; default: %(default)s)")
     p_coin.add_argument("--coin-model", default=None,
                         help="model id for LLM coining (default: OPENROUTER_COIN_MODEL, else the scoring model)")
     p_coin.add_argument("--max-cost", type=float, default=None, help=_MAX_COST_HELP)
@@ -511,6 +518,76 @@ Coining Examples:
                       help="parallel requests (default: %(default)s)")
     p_rs.add_argument("--max-cost", type=float, default=None, help=_MAX_COST_HELP)
     p_rs.add_argument("--no-backup", action="store_true", help="skip the database backup before re-scoring")
+
+    p_fam = sub.add_parser(
+        "families",
+        help="name families among the best names (overused openings/endings), bans, collisions and sound-alikes",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  namefinder families                    # saturation report over the current best 100 names
+  namefinder families --top 300 --flags  # also list every flagged name (ban, collision, sound-alike)
+  namefinder families --word fotogram --word trailsift   # check single names
+""",
+    )
+    _add_common(p_fam)
+    p_fam.add_argument("--top", type=int, default=config.FAMILY_TOP,
+                       help="how many of the best names to analyse (default: %(default)s)")
+    p_fam.add_argument("--flags", action="store_true", help="list the flagged names, not just the counts")
+    p_fam.add_argument("--word", action="append", default=[], metavar="NAME", help="check one name (repeatable)")
+
+    p_emb = sub.add_parser(
+        "embed",
+        help="meaning embeddings: build the cache, show idea seeds, query by phrase, test obliqueness",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  namefinder embed                       # embed base words, approved ideas, anchors and top rated names
+  namefinder embed --seeds               # base words retrieved for each approved idea (what `coin` seeds with)
+  namefinder embed --near "who posted it first"
+  namefinder embed --lift                # does obliqueness track the tournament judge?
+""",
+    )
+    _add_common(p_emb)
+    p_emb.add_argument("--seeds", action="store_true", help="show the base words retrieved for each approved idea")
+    p_emb.add_argument("--near", default=None, metavar="TEXT", help="base words and rated names nearest a phrase")
+    p_emb.add_argument("--lift", action="store_true",
+                       help="rank correlation of idea closeness, category closeness and obliqueness with the "
+                            "tournament rating")
+    p_emb.add_argument("--top", type=int, default=300,
+                       help="rated names to embed (build) or analyse (--lift) (default: %(default)s)")
+    p_emb.add_argument("--max-cost", type=float, default=None, help=_MAX_COST_HELP)
+
+    p_taste = sub.add_parser(
+        "taste",
+        help="how well the scorer and each tournament judge agree with your own ratings (prompts/taste.txt)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Rate names yourself in prompts/taste.txt, one per line: `vestigome A  # why` (tiers A-D, ? = unrated).
+
+Examples:
+  namefinder taste                                  # every stored rating set vs your tiers (no API calls)
+  namefinder taste --eval 20                        # current judge prompt on 20 groups of your names
+  namefinder taste --eval 20 --prompt prompts/tournament_prompt.draft.md
+  namefinder taste --scorer 2                       # brand scorer on your names, 2 passes (about $0.01)
+  namefinder taste --scorer 2 --prompt prompts/system_prompt.draft.md
+      measure a candidate judge prompt before it starts a new rating set (nothing is saved)
+""",
+    )
+    _add_common(p_taste)
+    p_taste.add_argument("--eval", type=int, default=0, metavar="N",
+                         help="play N groups of your rated names with the judge and report agreement")
+    p_taste.add_argument("--scorer", type=int, default=0, metavar="PASSES",
+                         help="score your rated names PASSES times with the brand scorer and report agreement "
+                              "(nothing is saved)")
+    p_taste.add_argument("--prompt", type=Path, default=None, metavar="FILE",
+                         help="with --eval or --scorer: judge or scorer system prompt to test ({product} is filled in)")
+    p_taste.add_argument("--model", default=None, help="with --eval or --scorer: model (default: the tournament or scoring model)")
+    p_taste.add_argument("--file", type=Path, default=None, help="taste file (default: prompts/taste.txt)")
+    p_taste.add_argument("--group-size", type=int, default=8, help="names per group with --eval (default: %(default)s)")
+    p_taste.add_argument("--concurrency", type=int, default=config.SCORE_CONCURRENCY)
+    p_taste.add_argument("--seed", type=int, default=None, help="seed for the groups, to compare prompts on the same draw")
+    p_taste.add_argument("--max-cost", type=float, default=None, help=_MAX_COST_HELP)
 
     p6 = sub.add_parser("status", help="show pipeline cache counts and funnel summary")
     _add_common(p6)
@@ -700,6 +777,78 @@ def cmd_engines(db_path, lift: str | None, threshold: float | None, min_names: i
     console.print_engine_table(rows, thr, title=f"Coining engines{note}: share of names in the tail")
 
 
+def cmd_families(db_path, top: int, flags: bool, words: list[str]) -> None:
+    from collections import Counter
+
+    from rich import box
+    from rich.table import Table
+
+    from . import families
+    con = console._console
+    if words:
+        t = Table(box=box.SIMPLE_HEAD, title="Name checks")
+        for col in ("name", "ban", "family", "collision", "sounds like / misspells", "sound key"):
+            t.add_column(col)
+        with db.session(db_path) as conn:
+            sat = families.saturation(conn)
+        for w in words:
+            w = w.strip().lower()
+            col = families.collisions(w)
+            t.add_row(w, families.banned(w) or "",
+                      " ".join(families.keys(w)) + (" (overused)" if sat.hits(w) else ""),
+                      ", ".join(f"{c.term} {c.score:.2f} ({c.how})" for c in col[:3]),
+                      ", ".join(families.soundalikes(w)[:4]), families.sound_key(w))
+        con.print(t)
+        return
+    with db.session(db_path) as conn:
+        names, source = families.best_names(conn, top)
+    if not names:
+        console.log("[families] no scored or rated coined names yet.")
+        return
+    sat = families.compute_saturation(names, source=source)
+    t = Table(box=box.SIMPLE_HEAD, title=f"Families among the best {len(names)} names ({source})",
+              caption=f"overused = at least {sat.cap} names (FAMILY_SHARE {config.FAMILY_SHARE:.0%}, "
+                      f"FAMILY_MIN {config.FAMILY_MIN}); most new names in them are dropped and the prompts say so")
+    t.add_column("family")
+    t.add_column("names", justify="right")
+    t.add_column("share", justify="right")
+    t.add_column("")
+    t.add_column("examples", style="dim")
+    for fam, n in sat.counts.most_common(20):
+        if n < 2:
+            break
+        members = [w for w in names if fam in families.keys(w)]
+        ex = members[:6]
+        mark = ("banned" if all(families.banned(w) for w in members)
+                else "overused" if n >= sat.cap else "")
+        t.add_row(fam, str(n), f"{n / len(names):.0%}", mark, ", ".join(ex))
+    con.print(t)
+    reasons: Counter = Counter()
+    flagged = []
+    terms = families.load_terms()
+    for w in names:
+        why = []
+        b = families.banned(w)
+        if b:
+            why.append(("banned", f"banned {b}"))
+        col = families.collisions(w, terms)
+        if col:
+            why.append(("collision", f"close to {col[0].term} ({col[0].how})"))
+        sl = families.soundalikes(w)
+        if sl:
+            why.append(("sound-alike", f"sounds like / misspells {', '.join(sl[:2])}"))
+        for k, _ in why:
+            reasons[k] += 1
+        if why:
+            flagged.append((w, "; ".join(x for _, x in why)))
+    console.log(f"[families] bans: {', '.join(families.ban_labels()) or 'none'}")
+    console.log(f"[families] {len(flagged)} of {len(names)} names flagged: "
+                + ", ".join(f"{n} {k}" for k, n in reasons.most_common()))
+    if flags:
+        for w, why in flagged:
+            console.log(f"  {w:14s} {why}")
+
+
 def cmd_status(db_path) -> None:
     with db.session(db_path) as conn:
         def one(sql, *args):
@@ -761,7 +910,8 @@ def _screen_words(args) -> list[str] | None:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
-    if args.cmd in ("score", "score-jev", "refine", "coin", "rescore", "tournament", "ideas", "generate", "evolve"):
+    if args.cmd in ("score", "score-jev", "refine", "coin", "rescore", "tournament", "ideas", "generate", "evolve",
+                    "embed", "taste"):
         budget.reset(getattr(args, "max_cost", None))
 
     try:
@@ -805,7 +955,7 @@ def main(argv: list[str] | None = None) -> int:
                            prune_below=None if args.no_prune else args.prune_below,
                            prune_rank=None if args.no_prune else args.prune_rank,
                            margin=args.margin, min_games=args.min_games, z=args.z,
-                           group_size=args.group_size, refit_only=args.refit)
+                           group_size=args.group_size, refit_only=args.refit, screen=not args.no_screen)
         elif args.cmd == "ideas":
             from . import ideas
             if args.ideas_cmd == "generate":
@@ -873,6 +1023,7 @@ def main(argv: list[str] | None = None) -> int:
                 concurrency=args.concurrency,
                 llm_share=args.llm_share,
                 coin_model=args.coin_model,
+                idea_share=args.idea_share,
                 db_path=args.db,
             )
         elif args.cmd == "recompute":
@@ -883,8 +1034,31 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"[recompute] backup: {path}")
         elif args.cmd == "rescore":
             from . import score as score_mod
-            score_mod.rescore_run(top_n=args.top_n, model=args.model, backend=args.backend,
+            top_n = min(args.top_n, args.limit) if args.limit else args.top_n
+            score_mod.rescore_run(top_n=top_n, model=args.model, backend=args.backend,
                                   concurrency=args.concurrency, db_path=args.db, backup=not args.no_backup)
+        elif args.cmd == "families":
+            cmd_families(args.db, args.top, args.flags, args.word)
+        elif args.cmd == "taste":
+            from . import taste
+            if args.scorer:
+                taste.evaluate_scorer(passes=args.scorer, prompt_file=args.prompt, model=args.model,
+                                      seed=args.seed, concurrency=args.concurrency, path=args.file, db_path=args.db)
+            elif args.eval:
+                taste.evaluate(groups=args.eval, prompt_file=args.prompt, model=args.model, seed=args.seed,
+                               concurrency=args.concurrency, group_size=args.group_size, path=args.file)
+            else:
+                taste.report(db_path=args.db, path=args.file)
+        elif args.cmd == "embed":
+            from . import embed
+            if args.near:
+                embed.near(args.near, db_path=args.db)
+            elif args.seeds:
+                embed.show_seeds(db_path=args.db)
+            elif args.lift:
+                embed.lift(top=args.top, db_path=args.db)
+            else:
+                embed.build(names_top=args.top, db_path=args.db)
         elif args.cmd == "status":
             cmd_status(args.db)
         return 0

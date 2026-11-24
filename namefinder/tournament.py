@@ -35,36 +35,49 @@ MIN_GAMES = 4
 DEFAULT_JUDGE_PROMPT = (
     "You are a senior brand-naming strategist choosing between candidate names for one product.\n"
     "Product: {product}\n\n"
-    "You will be shown a group of candidate names in arbitrary order. Rank them from best to worst "
-    "as the name of THIS product. Judge each name on:\n"
-    "- a short, TRUE answer to 'why is it called that?' in this product's terms (origins and copies, spread, "
-    "matches and their evidence, asking the record, two kinds of source, time and precedence, and its purpose: seeing what "
-    "is documented, disputed, uncertain or untraced, and finding links no single search shows). A name may "
-    "bridge to the mechanism or to the purpose; either is a true bridge;\n"
-    "- fit with the plain technical voice (sounds like a sober term that ought to exist; no hype, no cute or "
-    "decorative metaphor, no overclaiming);\n"
-    "- how it sounds and reads as a lowercase wordmark: easy to say once, spelled as it sounds, clear stress, "
-    "no mishearing;\n"
-    "- trap checks: reads as a misspelling of a real word, echoes a well-known brand in any sector, "
-    "clinical or pharmaceutical ring, or overclaims (promises certainty, discovery or answers on its own).\n"
-    "Be decisive and comparative: you must separate the names, no ties. Ignore the order they are shown in.\n"
-    "For every name give its single biggest flaw in at most 10 words (use 'none' only if it truly has none)."
+    "You will be shown a group of candidate names in arbitrary order. Look at each name on its own first, "
+    "then rank them from best to worst as the name of THIS product.\n\n"
+    "For each name, in order:\n"
+    "1. Read it as a stranger sees it once, in lowercase: where does the eye split it, and does every part "
+    "have a vowel to say? A name that cannot be read aloud on sight fails, whatever it means.\n"
+    "2. Say it: how most English readers would pronounce it, with the stressed syllable.\n"
+    "3. Story: the short, TRUE answer to 'why is it called that?' in this product's terms, one a journalist "
+    "would repeat to a colleague. Write 'none' if it takes a stretch.\n"
+    "4. Fatal flaw, if it has one (see below).\n\n"
+    "Then rank, weighing roughly in this order:\n"
+    "- It reads and says cleanly on first sight and is spelled the way it sounds.\n"
+    "- Its story hints from the side at what a journalist does or sees with the product, rather than naming "
+    "the category (photo, image, picture, verify, fake, forensic). A literal category name is generic, sits "
+    "close to existing products (TinEye, Truepic) and should rank below an equally clean oblique one. A name "
+    "earns nothing for merely containing a word from the product description; the story has to hold up.\n"
+    "- It sounds like a word that could already exist: a recognisable root in a natural shape. A classical "
+    "ending (-al, -on, -um, -ome) on a root that carries the idea is fine; it is generic only when bolted onto "
+    "a category word or onto a root that means nothing here.\n"
+    "- It fits the plain technical voice: no hype, no cute or decorative metaphor, no overclaiming (certainty, "
+    "discovery, answers on its own). Words of verdict (verity, truth, proof, authentic, genuine) are wrong in "
+    "meaning: the tool shows a record, not a ruling.\n\n"
+    "Fatal flaws (code ranks a name with one below every name without one, so use them only when certain):\n"
+    "- unreadable: a reader cannot say it on sight (it ends or breaks on consonants with no vowel, or its "
+    "letters do not say what they spell).\n"
+    "- misspelling: it reads as a misspelling of a real word, or is heard as one, including a field term.\n"
+    "- brand echo: it sounds like, or sits one letter from, a well-known brand in any sector.\n"
+    "- wrong meaning: its obvious reading points to a different product (photo editing, surveillance, medicine, a "
+    "consumer app) or says something false about this one.\n"
+    "Everything else is 'none': a weak story or a so-so sound is a flaw, not a fatal one.\n"
+    "Be decisive and comparative: no ties. Ignore the order the names are shown in."
 )
 
-JUDGE_USER = """Rank these {n} candidate names, best first:
+FATAL_KINDS = ("unreadable", "misspelling", "brand echo", "wrong meaning")
+
+JUDGE_USER = """Candidates ({n}):
 
 {words}
 
 Return ONLY a JSON object, no prose or fences, in this form:
-{{"ranking": ["best", "...", "worst"], "flaws": {{"name": "biggest flaw, at most 10 words"}}}}
-"ranking" must contain every name above exactly once, spelled as given."""
-
-
-JUDGE_USER_BARE = """Rank these {n} candidate names, best first:
-
-{words}
-
-Return ONLY a JSON object, no prose or fences: {{"ranking": ["best", "...", "worst"]}}
+{{"notes": [{{"name": "as given", "reads": "how the eye splits it, with dots", "say": "respelling, stressed syllable in CAPITALS", "story": "why it is called that, at most 12 words, or none", "fatal": "none", "flaw": "its biggest flaw, at most 10 words"}}],
+ "ranking": ["best", "...", "worst"]}}
+Write "notes" first, one entry per name in the order shown, then "ranking".
+"fatal" is one of: none, unreadable, misspelling, brand echo, wrong meaning.
 "ranking" must contain every name above exactly once, spelled as given."""
 
 
@@ -176,8 +189,18 @@ def make_groups(
 
 
 # --- judge calls -----------------------------------------------------------
+def _fatal_kind(value: Any) -> str | None:
+    v = str(value or "").strip().lower()
+    return next((k for k in FATAL_KINDS if k in v), None)
+
+
 def parse_judgement(content: str | None, group: Sequence[str]) -> tuple[list[str], dict[str, str]] | None:
-    """(ranking, flaws) if the answer ranks exactly the names in `group`, else None."""
+    """(ranking, notes) if the answer ranks exactly the names in `group`, else None.
+
+    Names the judge marked with a fatal flaw are moved below every name without one (each part keeps
+    the judge's order), so a flaw the judge saw cannot be outvoted by its overall impression. Their
+    note starts with "fatal (<kind>)". Older answers with a "flaws" object instead of "notes" parse too.
+    """
     if not content or not isinstance(content, str):
         return None
     text = re.sub(r"^```(?:json)?|```$", "", content.strip(), flags=re.MULTILINE).strip()
@@ -194,23 +217,45 @@ def parse_judgement(content: str | None, group: Sequence[str]) -> tuple[list[str
     ranking = [str(w).strip().lower() for w in raw]
     if sorted(ranking) != sorted(group):
         return None
-    flaws = data.get("flaws") if isinstance(data.get("flaws"), dict) else {}
-    notes = {str(k).strip().lower(): str(v).strip()[:120] for k, v in flaws.items() if str(k).strip().lower() in group}
+    entries: dict[str, dict[str, Any]] = {}
+    raw_notes = data.get("notes")
+    if isinstance(raw_notes, list):
+        for e in raw_notes:
+            if isinstance(e, dict):
+                entries[str(e.get("name", "")).strip().lower()] = e
+    elif isinstance(raw_notes, dict):
+        entries = {str(k).strip().lower(): (v if isinstance(v, dict) else {"flaw": v}) for k, v in raw_notes.items()}
+    if isinstance(data.get("flaws"), dict):
+        for k, v in data["flaws"].items():
+            entries.setdefault(str(k).strip().lower(), {})["flaw"] = v
+    notes: dict[str, str] = {}
+    fatal: set[str] = set()
+    for w, e in entries.items():
+        if w not in group:
+            continue
+        flaw = str(e.get("flaw") or "").strip()
+        kind = _fatal_kind(e.get("fatal"))
+        if kind:
+            fatal.add(w)
+            flaw = f"fatal ({kind}): {flaw}" if flaw else f"fatal ({kind})"
+        if flaw:
+            notes[w] = flaw[:120]
+    if fatal and len(fatal) < len(ranking):
+        ranking = [w for w in ranking if w not in fatal] + [w for w in ranking if w in fatal]
     return ranking, notes
 
 
 async def _judge(
-    http, url, headers, model, system, group: list[str], flaws: bool = True,
+    http, url, headers, model, system, group: list[str],
 ) -> tuple[list[str], dict[str, str]] | None:
     body = {
         "model": model,
         "messages": [
             {"role": "system", "content": system},
-            {"role": "user", "content": (JUDGE_USER if flaws else JUDGE_USER_BARE).format(
-                n=len(group), words="\n".join(f"- {w}" for w in group))},
+            {"role": "user", "content": JUDGE_USER.format(n=len(group), words="\n".join(f"- {w}" for w in group))},
         ],
         "temperature": 0.2,
-        "max_tokens": 1500,
+        "max_tokens": 1000 + 120 * len(group),   # the per-name notes come before the ranking
         **config.openrouter_extras(url),
     }
     for attempt in range(5):
@@ -249,7 +294,7 @@ async def play_round(
     groups: list[list[str]], model: str, system: str, concurrency: int, pbar: Any = None,
     api_url: str | None = None, api_key: str | None = None, rng: random.Random | None = None,
 ) -> list[tuple[list[str], dict[str, str], list[str]]]:
-    """Judge every group in two orders. Returns (ranking, flaws, shown_order) per successful call."""
+    """Judge every group in two orders. Returns (ranking, notes, shown_order) per successful call."""
     url = api_url or config.OPENROUTER_URL
     key = api_key or config.secret(config.OPENROUTER_KEY_ENV)
     if not key and "localhost" not in url and "127.0.0.1" not in url:
@@ -260,9 +305,9 @@ async def play_round(
     results: list[tuple[list[str], dict[str, str], list[str]]] = []
 
     async with net.async_client(timeout=180.0) as http:
-        async def one(order: list[str], flaws: bool) -> None:
+        async def one(order: list[str]) -> None:
             async with sem:
-                out = await _judge(http, url, headers, model, system, order, flaws)
+                out = await _judge(http, url, headers, model, system, order)
             if out:
                 results.append((out[0], out[1], order))
             if pbar:
@@ -273,9 +318,10 @@ async def play_round(
         for g in groups:
             first = list(g)
             rng.shuffle(first)
-            jobs.append(one(first, True))
-            # reverse order cancels position bias; flaw notes from one ordering are enough
-            jobs.append(one(list(reversed(first)), False))
+            # reverse order cancels position bias. Both calls write their notes before ranking: on the
+            # previous judge, flaws written after the ranking made no measurable difference to it.
+            jobs.append(one(first))
+            jobs.append(one(list(reversed(first))))
         await asyncio.gather(*jobs)
     return results
 
@@ -355,7 +401,7 @@ def prune_pool(
 
 def plan_pool(
     conn, qversion: str, size: int, refs: Sequence[str], tld: str,
-    source: str = "score", judge: str | None = None, carry: int = 60,
+    source: str = "score", judge: str | None = None, carry: int = 60, screen: bool = True,
 ) -> tuple[list[str], dict[str, list[str]]]:
     """The names to play, and the parts they came from (rated / ideas / bulk).
 
@@ -366,6 +412,9 @@ def plan_pool(
              (a confirmation pass that gives the leaders more games, and a place for new variants to join).
     `both`:  everything already rated under this judge, the idea names, and the top `size` names by
              the old composite, so unselected old names play against the idea names and the old elite.
+
+    With `screen` (default), banned names, collisions, sound-alikes and names over the per-family cap
+    leave the pool (`families.screen_pool`); `score` mode over-fetches so the pool still reaches `size`.
     """
     judge = judge or ""
     rated = list(db.tournament_ratings(conn, judge))
@@ -387,12 +436,18 @@ def plan_pool(
         parts["ideas"] = [w for w in db.tournament_pool_ideas(conn, judge, tld, 0) if w not in set(rated)]
         pool = top + parts["ideas"]
     else:
-        pool = db.tournament_pool(conn, qversion, size, tld)
+        pool = db.tournament_pool(conn, qversion, size * 4 if screen else size, tld)
+    if screen:
+        from . import families
+        pool, dropped = families.screen_pool(pool, keep=refs, cap=max(4, round(config.FAMILY_POOL_SHARE * size)))
+        if source == "score":
+            pool = pool[:size]
+        parts["screened"] = [f"{n} {why}" for why, n in dropped.most_common()]
     return list(dict.fromkeys(list(refs) + pool)), parts
 
 
-def build_pool(conn, qversion, size, refs, tld, source="score", judge=None, carry=60) -> list[str]:
-    return plan_pool(conn, qversion, size, refs, tld, source, judge, carry)[0]
+def build_pool(conn, qversion, size, refs, tld, source="score", judge=None, carry=60, screen=True) -> list[str]:
+    return plan_pool(conn, qversion, size, refs, tld, source, judge, carry, screen)[0]
 
 
 def label_pool(conn, judge: str, refs: Sequence[str], parts: dict[str, list[str]], source: str, carry: int) -> None:
@@ -520,6 +575,7 @@ def run(
     z: float = PRUNE_Z,
     group_size: int = GROUP_SIZE,
     refit_only: bool = False,
+    screen: bool = True,
 ) -> None:
     from shutil import get_terminal_size
 
@@ -543,7 +599,10 @@ def run(
     rng = random.Random(seed)
 
     with db.session(db_path) as conn:
-        pool, parts = plan_pool(conn, qversion, pool_size, ref_list, tld, source, judge, carry)
+        pool, parts = plan_pool(conn, qversion, pool_size, ref_list, tld, source, judge, carry, screen)
+        if parts.get("screened") and not (show_only or refit_only):
+            console.log("[tournament] pool screen dropped " + ", ".join(parts["screened"])
+                        + " (--no-screen keeps them)")
         label_pool(conn, judge, ref_list, parts, source, carry)
         if refit_only or not show_only:   # ratings come from a batch fit over every logged match
             refit(conn, judge)
@@ -575,6 +634,7 @@ def run(
             header.append(extra, style="dim")
 
     agree: list[float] = []
+    verdicts = [0, 0]      # names judged, names marked fatal
     played_rounds = 0
     table_rows = min(show, max(6, get_terminal_size(fallback=(120, 40)).lines - 14))
 
@@ -636,6 +696,8 @@ def run(
                     for ranking, flaws, _ in played:
                         db.save_tournament_match(conn, judge, round_no, ranking, flaws, ts)
                         notes_by_word.update({w: f for w, f in flaws.items() if f})
+                        verdicts[0] += len(ranking)
+                        verdicts[1] += sum(1 for f in flaws.values() if f.startswith("fatal ("))
                     new_r, new_se, new_g = refit(conn, judge, init=ratings, notes=notes_by_word, ts=ts)
                     ratings, se, games = dict(new_r), dict(new_se), dict(new_g)
                     delta = {w: ratings[w] - snapshot[w] for w in pool if w in ratings and w in snapshot}
@@ -652,6 +714,9 @@ def run(
     if agree:
         console.log(f"[tournament] judge consistency: {100 * sum(agree) / len(agree):.0f}% of name pairs were ordered "
                     "the same in both shown orders (50% = coin flip, 100% = fully stable).")
+    if verdicts[0]:
+        console.log(f"[tournament] fatal flags: {100 * verdicts[1] / verdicts[0]:.0f}% of name judgements "
+                    "(those names were ranked below the rest of their group).")
     console.log(budget.summary())
     if budget.exhausted():
         console.log(budget.stop_notice())

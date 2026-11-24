@@ -1,0 +1,9 @@
+# Terms a new name must not look or sound like (namefinder/families.py). One or more per line, '#' comments.
+# Copy to prompts/collision_terms.txt (private) and list your competitors, the field's own vocabulary and any
+# well-known brands a name could be mistaken for.
+# competitors and adjacent products
+examplecorp acmegraph
+# field vocabulary
+ontology taxonomy
+# well-known brands
+instagram polaroid pokedex rolodex kleenex playtex

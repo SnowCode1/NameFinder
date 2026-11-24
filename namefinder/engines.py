@@ -92,9 +92,14 @@ def breakdown_table(conn, qversion: str, by: str, threshold: float | None = None
     groups: dict[str, list] = defaultdict(list)
     for r in data:
         if by == "operator":
-            if not r["operator"]:
-                continue
-            label = f"{r['engine']}:{r['operator']}"
+            op = r["operator"]
+            if not op:
+                if r["engine"] != "llm":
+                    continue
+                op = "unseeded"           # LLM names from the ordinary parent draw, the baseline for seed
+            elif op.startswith("seed:"):
+                op = "seed"               # LLM names from a base retrieved for an idea (any idea)
+            label = f"{r['engine']}:{op}"
         else:
             base = (r["parents"] or "").split(",")[0]
             label = layer.get(base, "unknown")
@@ -110,11 +115,23 @@ def breakdown_table(conn, qversion: str, by: str, threshold: float | None = None
     return out, thr
 
 
+def _family_tail(w: str) -> str:
+    from . import families
+    return families.tail(w)
+
+
+def _family_head(w: str) -> str:
+    from . import families
+    return families.head(w)
+
+
 FEATURES: dict[str, Callable[[str], object]] = {
     "ending": lambda w: w[-2:],
     "last": lambda w: w[-1],
     "start": lambda w: w[:2],
     "length": len,
+    "tail": _family_tail,     # family ending (namefinder families): -ome, -gram, -path ...
+    "head": _family_head,     # family opening: orig-, foto- ...
 }
 
 

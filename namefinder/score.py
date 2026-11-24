@@ -159,7 +159,8 @@ def spoken_review(word: str, item: dict[str, Any]) -> dict[str, Any]:
 
 
 ROOT_SYSTEM_PROMPT = config.load_prompt("root_prompt.md", DEFAULT_ROOT_SYSTEM_PROMPT)
-BRAND_SYSTEM_PROMPT = config.load_prompt("system_prompt.md", DEFAULT_SYSTEM_PROMPT)
+BRAND_SYSTEM_PROMPT = config.load_prompt("system_prompt.md", DEFAULT_SYSTEM_PROMPT).replace(
+    "{product}", config.PRODUCT_BLURB)   # the product brief, kept in one place
 OPENROUTER_SYSTEM_PROMPT = BRAND_SYSTEM_PROMPT
 OPENROUTER_USER_PROMPT = config.load_prompt("user_prompt.md", DEFAULT_USER_PROMPT)
 
@@ -169,7 +170,7 @@ def prompts_for(is_root: bool) -> tuple[str, str]:
     if is_root:
         return ROOT_SYSTEM_PROMPT, OPENROUTER_USER_PROMPT
     user_prompt = OPENROUTER_USER_PROMPT
-    if '"verbable"' not in user_prompt:
+    if config.VERB_BONUS and '"verbable"' not in user_prompt:   # no verb rating when it carries no weight
         user_prompt += VERBABLE_ADDENDUM.replace("{", "{{").replace("}", "}}")
     if '"say_aloud"' not in user_prompt:
         user_prompt += SPOKEN_ADDENDUM.replace("{", "{{").replace("}", "}}")
@@ -338,6 +339,135 @@ def _parse_scores(content: str | None) -> list[dict[str, Any]] | None:
     return None
 
 
+async def request_scores(http, url: str, headers: dict[str, str], body: dict[str, Any]) -> list[dict[str, Any]] | None:
+    """One scoring call with retries on glitches, rate limits and unparseable answers; None when it gives up."""
+    for attempt in range(6):
+        if budget.exhausted():
+            return None
+        try:
+            r = await http.post(f"{url}/chat/completions", json=body, headers=headers)
+        except Exception as exc:
+            wait_s = min(60.0, 3.0 * (2 ** attempt))
+            tqdm.write(f"[score] network connection glitch ({exc.__class__.__name__}): retrying in {wait_s:.1f}s...", file=sys.stderr)
+            await asyncio.sleep(wait_s)
+            continue
+        if r.status_code == 429:
+            wait_s = net.backoff_delay(attempt, r.headers.get("retry-after"))
+            tqdm.write(f"[score] rate limited (429), pausing {wait_s:.1f}s...", file=sys.stderr)
+            await asyncio.sleep(wait_s)
+            continue
+        if r.status_code >= 500:
+            wait_s = min(60.0, 3.0 * (2 ** attempt))
+            tqdm.write(f"[score] OpenRouter HTTP {r.status_code}; retrying in {wait_s:.1f}s...", file=sys.stderr)
+            await asyncio.sleep(wait_s)
+            continue
+        if r.status_code != 200:
+            tqdm.write(f"[score] OpenRouter HTTP {r.status_code}: {r.text[:180]}", file=sys.stderr)
+            return None
+        try:
+            payload = r.json()
+            budget.record(payload)
+            choices = payload.get("choices") or [{}]
+            parsed = _parse_scores(choices[0].get("message", {}).get("content"))
+            if parsed:
+                return parsed
+        except (KeyError, IndexError, ValueError, AttributeError):
+            pass
+        await asyncio.sleep(2.0)
+    return None
+
+
+def merge_items(parsed: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Answer objects by lowercased word. The model sometimes splits one word into two objects
+    (spoken keys, then scores); merge them so neither half is lost."""
+    by_word: dict[str, dict[str, Any]] = {}
+    for item in parsed:
+        by_word.setdefault(str(item.get("word", "")).strip().lower(), {}).update(item)
+    return by_word
+
+
+def fatal_kind(value: Any) -> str | None:
+    """The fatal-flaw kind a scorer or judge named ("unreadable", "misspelling", ...), or None."""
+    from .tournament import FATAL_KINDS
+    v = str(value or "").strip().lower()
+    return next((k for k in FATAL_KINDS if k in v), None)
+
+
+def score_row(conn, w: str, item: dict[str, Any], is_root: bool) -> dict[str, Any] | None:
+    """Score columns and composite for one answer object; None when a required score is missing."""
+    if any(item.get(k) is None for k in REQUIRED_SCORE_KEYS):
+        return None
+    try:
+        fit = float(item["fit"])
+        natural = float(item["natural"])
+        spellable = float(item["spellable"])
+        memorable = float(item["memorable"])
+        neg = float(item.get("neg", 0.0))
+        taken = float(item.get("taken", 0.0))
+        common = float(item.get("common", 0.0))
+    except (TypeError, ValueError):
+        return None
+
+    why_text = str(item.get("why", "")).strip()[:450] or None
+    why_not_raw = item.get("why_not")
+    if isinstance(why_not_raw, list):
+        why_not_text = " ".join(str(x) for x in why_not_raw).strip()[:450] or None
+    else:
+        why_not_text = str(why_not_raw or "").strip()[:450] or None
+
+    verbable = None
+    if not is_root and item.get("verbable") is not None:
+        try:
+            verbable = max(0.0, min(1.0, float(item["verbable"])))
+        except (TypeError, ValueError):
+            verbable = None
+
+    if is_root:
+        comp_score = composite_root(fit, natural, spellable, memorable, neg)
+        sp = None
+    else:
+        sp = spoken_review(w, item)
+        neg = max(neg, sp["mishear_risk"])     # a damaging sound-alike is a connotation risk
+        if fatal_kind(item.get("fatal")):      # enforced in code, like the tournament's fatal flags
+            neg = max(neg, config.SCORE_FATAL_NEG)
+        comp_score = composite_brand(fit, natural, spellable, memorable, neg, taken, common, verbable)
+        comp_score = adjust_brand_composite(conn, w, comp_score, sp["phonetic"])
+
+    return {
+        "word": w,
+        "fit": round(max(0.0, min(1.0, fit)), 4),
+        "natural": round(max(0.0, min(1.0, natural)), 4),
+        "spellable": round(max(0.0, min(1.0, spellable)), 4),
+        "memorable": round(max(0.0, min(4.0, memorable)), 3),
+        "neg": round(max(0.0, min(1.0, neg)), 4),
+        "taken": round(max(0.0, min(1.0, taken)), 4),
+        "common": round(max(0.0, min(1.0, common)), 4),
+        "composite": comp_score,
+        "why": why_text,
+        "why_not": why_not_text,
+        "syllables": sp["syllables"] if sp else None,
+        "say_aloud": sp["say_aloud"] if sp else None,
+        "misheard_as": sp["misheard_as"] if sp else None,
+        "ambiguity": sp["ambiguity"] if sp else None,
+        "phonetic": sp["phonetic"] if sp else None,
+        "verbable": verbable,
+    }
+
+
+def brand_body(model: str, system: str, user_prompt: str, chunk: list[str], url: str) -> dict[str, Any]:
+    """Request body for one brand-scoring call."""
+    return {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user_prompt.format(words=", ".join(chunk))},
+        ],
+        "temperature": 0.2,
+        "max_tokens": 3500 + 140 * len(chunk),   # the notes and spoken review add ~120 output tokens per word
+        **config.openrouter_extras(url),
+    }
+
+
 async def score_words_openrouter(
     words: list[str],
     qversion: str,
@@ -404,55 +534,12 @@ async def score_words_openrouter(
                         {"role": "user", "content": user_prompt.format(words=", ".join(chunk)) + gloss_note},
                     ],
                     "temperature": 0.2,
-                    # the spoken review adds ~60 output tokens per brand word
-                    "max_tokens": 3500 if is_root else 3500 + 80 * len(chunk),
+                    # the notes and spoken review add ~120 output tokens per brand word
+                    "max_tokens": 3500 if is_root else 3500 + 140 * len(chunk),
                     **config.openrouter_extras(url),
                 }
 
-                parsed: list[dict[str, Any]] | None = None
-                for attempt in range(6):
-                    if budget.exhausted():
-                        break
-                    try:
-                        r = await http.post(
-                            f"{url}/chat/completions",
-                            json=body,
-                            headers=headers,
-                        )
-                    except Exception as exc:
-                        wait_s = min(60.0, 3.0 * (2 ** attempt))
-                        tqdm.write(f"[score] network connection glitch ({exc.__class__.__name__}): retrying in {wait_s:.1f}s...", file=sys.stderr)
-                        await asyncio.sleep(wait_s)
-                        continue
-
-                    if r.status_code == 429:
-                        wait_s = net.backoff_delay(attempt, r.headers.get("retry-after"))
-                        tqdm.write(f"[score] rate limited (429), pausing {wait_s:.1f}s...", file=sys.stderr)
-                        await asyncio.sleep(wait_s)
-                        continue
-
-                    if r.status_code >= 500:
-                        wait_s = min(60.0, 3.0 * (2 ** attempt))
-                        tqdm.write(f"[score] OpenRouter HTTP {r.status_code}; retrying in {wait_s:.1f}s...", file=sys.stderr)
-                        await asyncio.sleep(wait_s)
-                        continue
-
-                    if r.status_code != 200:
-                        tqdm.write(f"[score] OpenRouter HTTP {r.status_code}: {r.text[:180]}", file=sys.stderr)
-                        break
-
-                    try:
-                        payload = r.json()
-                        budget.record(payload)
-                        choices = payload.get("choices") or [{}]
-                        content = choices[0].get("message", {}).get("content")
-                        parsed = _parse_scores(content)
-                        if parsed:
-                            break
-                    except (KeyError, IndexError, ValueError, AttributeError):
-                        pass
-
-                    await asyncio.sleep(2.0)
+                parsed = await request_scores(http, url, headers, body)
 
                 if not parsed:
                     if budget.exhausted():
@@ -463,79 +550,23 @@ async def score_words_openrouter(
                     advance(len(chunk))
                     return
 
-                # The model sometimes splits one word into two objects (spoken keys, then
-                # scores); merge them so neither half is lost.
-                by_word: dict[str, dict[str, Any]] = {}
-                for item in parsed:
-                    by_word.setdefault(str(item.get("word", "")).strip().lower(), {}).update(item)
+                by_word = merge_items(parsed)
                 now_ts = _now()
                 missing = 0
                 for w in chunk:
                     item = by_word.get(w.lower())
                     if not item:
                         continue
-                    # Never invent scores: a word without them is left unscored.
-                    if any(item.get(k) is None for k in REQUIRED_SCORE_KEYS):
+                    row = score_row(conn, w, item, is_root)
+                    if row is None:     # never invent scores: a word without them is left unscored
                         missing += 1
                         continue
-                    try:
-                        fit = float(item["fit"])
-                        natural = float(item["natural"])
-                        spellable = float(item["spellable"])
-                        memorable = float(item["memorable"])
-                        neg = float(item.get("neg", 0.0))
-                        taken = float(item.get("taken", 0.0))
-                        common = float(item.get("common", 0.0))
-                    except (TypeError, ValueError):
-                        missing += 1
-                        continue
-
-                    why_text = str(item.get("why", "")).strip()[:450] or None
-                    why_not_raw = item.get("why_not")
-                    if isinstance(why_not_raw, list):
-                        why_not_text = " ".join(str(x) for x in why_not_raw).strip()[:450] or None
-                    else:
-                        why_not_text = str(why_not_raw or "").strip()[:450] or None
-
-                    verbable = None
-                    if not is_root and item.get("verbable") is not None:
-                        try:
-                            verbable = max(0.0, min(1.0, float(item["verbable"])))
-                        except (TypeError, ValueError):
-                            verbable = None
-
-                    if is_root:
-                        comp_score = composite_root(fit, natural, spellable, memorable, neg)
-                        sp = None
-                    else:
-                        sp = spoken_review(w, item)
-                        neg = max(neg, sp["mishear_risk"])     # a damaging sound-alike is a connotation risk
-                        comp_score = composite_brand(fit, natural, spellable, memorable, neg, taken, common, verbable)
-                        comp_score = adjust_brand_composite(conn, w, comp_score, sp["phonetic"])
-
-                    row = {
-                        "word": w,
+                    row.update({
                         "qversion": qversion,
                         "model": model,
-                        "fit": round(max(0.0, min(1.0, fit)), 4),
-                        "natural": round(max(0.0, min(1.0, natural)), 4),
-                        "spellable": round(max(0.0, min(1.0, spellable)), 4),
-                        "memorable": round(max(0.0, min(4.0, memorable)), 3),
-                        "neg": round(max(0.0, min(1.0, neg)), 4),
-                        "taken": round(max(0.0, min(1.0, taken)), 4),
-                        "common": round(max(0.0, min(1.0, common)), 4),
-                        "composite": comp_score,
-                        "why": why_text,
-                        "why_not": why_not_text,
                         "raw": json.dumps({"openrouter": item, "prompt": prompt_id}, default=str)[:20000],
                         "scored_at": now_ts,
-                        "syllables": sp["syllables"] if sp else None,
-                        "say_aloud": sp["say_aloud"] if sp else None,
-                        "misheard_as": sp["misheard_as"] if sp else None,
-                        "ambiguity": sp["ambiguity"] if sp else None,
-                        "phonetic": sp["phonetic"] if sp else None,
-                        "verbable": verbable,
-                    }
+                    })
                     db.upsert_score(conn, row)
                     done += 1
 

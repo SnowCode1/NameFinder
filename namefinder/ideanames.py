@@ -21,21 +21,21 @@ from typing import Any, Sequence
 from rich import box
 from rich.table import Table
 
-from . import budget, coin, config, console, db, domains, llm, net, tournament
+from . import budget, coin, config, console, db, domains, families, llm, net, tournament
 
 DEFAULT_PER_IDEA = 20
 
 NAME_RULES = (
     "Rules for every name:\n"
-    "- 5 to {max_len} letters (never fewer than 5), two or three syllables, with obvious stress.\n"
-    "- TRANSPARENT ROOT. Build the name on a root a journalist already recognises at a glance: an English word or "
-    "stem such as image, copy, frame, trace, trail, source, origin, match, record, mirror, lens, stem, archive, "
-    "origin, field. Then shape it with a classical prefix or ending: -ex, -dex, -is, -us, -um, -on, -os, -ia, -ix, "
-    "-ium, -eme, -ome, -ent, -gram, -sis, -set, or a prefix such as sub-, trans-, inter-, re-, ex-, per-, syn-, "
-    "meta-, ante-, pro-. A reader who sees the name should guess roughly what it is about within a few seconds, "
-    "WITHOUT being told. An obscure classical root that needs explaining (rog-, pakhus, syndesm-) fails this test; "
-    "use a classical root only when it is also a familiar word or stem (lacuna, corpus, archive, vestige). "
-    "A classical ending bolted onto nothing is junk.\n"
+    "- 5 to {max_len} letters (never fewer than 5), two to four syllables, easy to say on first sight.\n"
+    "- A TERM THAT OUGHT TO EXIST. The name should sound like a sober technical term beside codex, lexicon, genome "
+    "or nexus: a classical root that an educated reader already half-knows through a common English word, shaped "
+    "with a standard ending (-gram, -ome, -us, -eme, -ix, -dex, -el) or prefix (sub-, inter-, pluri-, retro-, "
+    "ante-). Literal is fine when the result is a well-made term. Say it aloud: the ending must sound natural on "
+    "its root; an arbitrary Latin ending bolted on (-an, -on, -um) usually sounds wrong. A plain English compound "
+    "is acceptable only when both halves are strong and the story is true. A root the reader would have to look "
+    "up (hodos, fons, origo, rog-, pakhus, syndesm-) fails, as does a soft half (-span, -map, -field, -carry), a "
+    "cute question compound (whence-), and any reading as surveillance, medicine or a photo-editing app.\n"
     "- Spread the names across roots: at most 4 names per root; vary the ending and the prefix; no more than three "
     "names may share the same last two letters.\n"
     "- Spelled the way it sounds: no k-for-c respellings, no stacked consonants, no silent letters. It must not read "
@@ -61,7 +61,7 @@ Roots to consider (not exclusive; prefer the familiar ones, and add a familiar E
 
 Invent {n} different candidate names for this idea.
 {feedback}
-For every name add "built": ONE clean line of at most 14 words saying which parts it is made of and what it means, e.g. "imago + -ome: the whole body of copies of one image". Never correct yourself or add commentary in this field; if a name is wrong, leave it out.
+For every name add "built": ONE clean line of at most 14 words saying which parts it is made of and what it means, e.g. "trail + sift: sorting every copy back to the first upload". Never correct yourself or add commentary in this field; if a name is wrong, leave it out.
 Return ONLY a JSON array, no prose or fences, of objects: {{"name": "...", "built": "..."}}"""
 
 
@@ -99,7 +99,7 @@ def judge_feedback(conn, n_best: int = 12, n_flaws: int = 8) -> tuple[list[str],
     if not judge:
         return [], []
     rated = db.tournament_ratings(conn, judge)
-    order = sorted(rated, key=lambda w: rated[w]["rating"], reverse=True)
+    order = [w for w in sorted(rated, key=lambda w: rated[w]["rating"], reverse=True) if not families.banned(w)]
     best = order[:n_best]
     flaws = db.tournament_flaws(conn, judge, n=1)
     pool = [flaws[w][0] for w in order[:30] if flaws.get(w)]
@@ -139,6 +139,7 @@ def register(
         rated = {r[0] for r in conn.execute("SELECT DISTINCT word FROM tournament_ratings")}
         mine |= rated | refs
         near = coin.NearIndex(mine, set(), config.COIN_NEAR_DUP)
+        gate = families.Gate(conn)
         seen: set[str] = set()
         group_stems: Counter = Counter()
         batch_stems: Counter = Counter()
@@ -163,7 +164,11 @@ def register(
                 accepted.append(c)
                 continue
             if not coin.acceptable(w, min_len=min_len, max_len=max_len):
-                stats["failed quality gate"] += 1
+                stats["banned root" if families.banned(w) else "failed quality gate"] += 1
+                continue
+            verdict = gate.check(w, (c.get("parent_word") or "",))
+            if not verdict.ok:
+                stats[gate.last_category] += 1
                 continue
             stem = w[:STEM_LEN]
             group = c.get("idea_id") or c.get("parent_word")
@@ -236,7 +241,7 @@ def show_new_names(accepted: Sequence[Candidate], free: set[str], title: str, sh
 
 
 # --- the stage ------------------------------------------------------------------
-async def _propose(ideas, per_idea, feedback, url, key, model, system, concurrency, bar):
+async def _propose(ideas, per_idea, feedback, url, key, model, system, concurrency, bar, avoid=""):
     sem = asyncio.Semaphore(max(1, concurrency))
     out: list[Candidate] = []
     best, flaws = feedback
@@ -253,6 +258,8 @@ async def _propose(ideas, per_idea, feedback, url, key, model, system, concurren
                 fb += f"Names a judge currently rates best for this product (match their quality, do not copy them): {', '.join(best)}.\n"
             if flaws:
                 fb += "Flaws the judge still finds even in those: " + "; ".join(flaws) + ". Avoid them.\n"
+            if avoid:
+                fb += avoid + "\n"
             user = NAMES_USER.format(idea=row["text"], roots=roots, n=per_idea, feedback=fb)
             async with sem:
                 parsed = await llm.chat_json(http, url, key, model, system, user,
@@ -290,6 +297,7 @@ def run(
         if idea_ids:
             ideas = [r for r in ideas if r["id"] in set(idea_ids)]
         feedback = judge_feedback(conn) if use_feedback else ([], [])
+        avoid = families.avoid_text(conn)
     if not ideas:
         console.log("[generate] no approved ideas. Run `namefinder ideas generate`, then `namefinder ideas review`.")
         return
@@ -302,7 +310,7 @@ def run(
                 + ("  (judge feedback included)" if feedback[0] else ""))
     with console.RichBar("Generating names", total=len(ideas), unit="idea", style="magenta") as bar:
         raw = asyncio.run(_propose(ideas, per_idea, feedback, url, key, model, system,
-                                   concurrency or config.SCORE_CONCURRENCY, bar))
+                                   concurrency or config.SCORE_CONCURRENCY, bar, avoid))
     random.shuffle(raw)   # so the near-duplicate gate does not always favour the first idea
     accepted, stats = register(raw, "idea", "idea", db_path, min_len, max_len)
     console.log(f"[generate] {len(raw)} proposed, {len(accepted)} kept"

@@ -38,6 +38,27 @@ AMBIGUOUS_PATTERNS = (
 # Junctions that are physically awkward to say across a syllable boundary.
 CLASH_JUNCTIONS = re.compile(r"(?:tl|dl|vl|zl|tn|dn|kn|gn|pn|bm|dm|tm|fn|vn)$")
 
+# Consonant runs an English word can end on. A name that ends on any other run has lost a vowel
+# (traceln, sourcr, originl, firstpst) and cannot be read aloud on sight.
+LEGAL_CODAS = frozenset("""
+ck ct ft ld lf lk lm lp lt lb lc lv mp mb mn nd ng nk ns nt nx nc nz pt rb rc rd rf rg rk rl rm rn rp rt rv rx
+sk sp st sc sm ss ll ff zz tt nn mm pp rr dd gg sh ch th ph gh gn gm kt wn wl wk wd wt xt
+ght tch nch lch rch nth lth rth pth dth rph rst sch nct mpt nst rld rsh lsh
+""".split())
+
+
+def bad_ending(word: str) -> str | None:
+    """The final consonant run if no English word could end on it (traceln -> 'ln'), else None."""
+    m = re.search(r"[^aeiouy]{2,}$", word.lower())
+    if not m:
+        return None
+    run = m.group()
+    if run in LEGAL_CODAS:
+        return None
+    if run[-1] in "sd" and (len(run) == 2 or run[:-1] in LEGAL_CODAS):
+        return None            # -s / -d after a legal ending (nds, lms, rld)
+    return run
+
 
 @dataclass
 class Phonetics:
@@ -155,6 +176,10 @@ def analyze(word: str) -> Phonetics:
     if n >= 2 and syls[0][-2:] == syls[1][:2] and len(syls[0]) > 1:
         penalty += 0.05
         notes.append("echoing syllables")
+    tail = bad_ending(w)
+    if tail:
+        penalty += 0.35
+        notes.append(f"no vowel before final '{tail}'")
 
     score = syl_score * (1.0 - 0.6 * ambiguity) - penalty
     return Phonetics(w, syls, round(max(0.0, min(1.0, score)), 4), round(ambiguity, 4), notes)

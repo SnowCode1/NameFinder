@@ -1,4 +1,4 @@
-"""LLM coining engine: ask a model to invent short, verb-like names from the best base words.
+"""LLM coining engine: ask a model to invent term-like names from the best base words.
 
 The model only proposes. Every name still has to pass the same quality gate as the
 rule engines (`coin.acceptable`), is de-duplicated against the database, and is
@@ -23,16 +23,15 @@ from typing import Any, Sequence
 
 from tqdm import tqdm
 
-from . import budget, coin, config, console, db, net, score
+from . import budget, coin, config, console, db, families, net, score
 
 DEFAULT_COIN_PROMPT = (
     "You are a brand-naming linguist inventing names for a software product.\n"
     "Product context: " + config.PRODUCT_BLURB + "\n\n"
-    "A great name is a coined word that feels like it already exists: elegant, easy to say, and visibly built "
-    "from a real idea. Think Spotify, Twilio, Kubernetes, Figma, Vercel, Sentry, Zapier.\n"
-    "Bonus: it works as a verb in \"I just ___ it and found what I needed\" (googled, zoomed, pinged).\n\n"
+    "A great name is a coined word that sounds like a sober technical term that ought to already exist "
+    "(codex, lexicon, genome, nexus): a classical root a reader half-knows, with a standard ending.\n\n"
     "Rules:\n"
-    "- 5 to 8 letters, two syllables preferred.\n"
+    "- 5 to 10 letters, two to four syllables, easy to say on first sight.\n"
     "- Build each name from the parent's meaning: use a Latin/Greek/Romance root, a meaningful fragment, or a clean "
     "blend with a second concept word. The reader should half-recognise the idea.\n"
     "- It must read like a natural word of English or another European language. No k-for-c respellings, no stacked "
@@ -43,7 +42,8 @@ DEFAULT_COIN_PROMPT = (
     "- Vary the endings: no more than two names per parent may share the same last two letters."
 )
 
-STYLE_ANCHORS = "ping, grep, zoom, slack, figma, notion, vercel, sentry"
+# Real terms with the wanted shape (a classical root plus a standard ending); short verb brands until 2026-11-24.
+STYLE_ANCHORS = "codex, lexicon, genome, nexus, spectrum, catalogue"
 
 _RECENT_REJECTS: deque[str] = deque(maxlen=24)
 _RECENT_NEAR: deque[str] = deque(maxlen=16)   # dropped as one-letter variants of weaker existing names
@@ -57,11 +57,19 @@ def _first_parent(parents: str | None) -> str:
 def feedback_examples(
     conn, qversion: str, n: int = 6, focus: Sequence[str] | None = None,
 ) -> tuple[list[str], list[str]]:
-    """(best, worst) recent LLM-coined names by composite; falls back to the best coined names overall.
+    """(best, worst) example names for the model.
 
-    With `focus`, only names built on those bases count (any engine, so the model sees what
-    works for this root); too few of them falls back to the global picture.
+    Without `focus`, your own ratings in prompts/taste.txt come first (A/B names and D names, never
+    held-out ones), because the composite disagrees with that taste. Otherwise: recent LLM-coined names by
+    composite, falling back to the best coined names overall. With `focus`, only names built on those bases
+    count (any engine, so the model sees what works for this root); too few of them falls back to the
+    global picture.
     """
+    if not focus:
+        from . import taste
+        best, worst = taste.examples(n=n)
+        if len(best) >= 3 and worst:
+            return best, worst
     rows = conn.execute(
         """
         SELECT w.word, w.engine, w.parents, s.composite FROM words w
@@ -71,6 +79,7 @@ def feedback_examples(
         """,
         (qversion,),
     ).fetchall()
+    rows = [r for r in rows if not families.banned(r["word"])]   # never hold up a banned name as an example
     if focus:
         scoped = [r["word"] for r in rows if _first_parent(r["parents"]) in focus]
         if len(scoped) >= 2 * n:
@@ -107,8 +116,11 @@ def build_user_prompt(
     existing: dict[str, list[str]] | None = None,
     near: Sequence[str] = (),
     glosses: dict[str, str] | None = None,
+    avoid: str = "",
+    seeds: dict[str, str] | None = None,
 ) -> str:
     glosses = glosses or {}
+    seeds = seeds or {}
     shown = [f"{p} ({glosses[p]})" if p in glosses else p for p in parents]
     lines = [
         f"Parents: {', '.join(shown)}",
@@ -119,6 +131,13 @@ def build_user_prompt(
         "lowercase letters only.",
         f"Real-world style anchors (do not output these): {STYLE_ANCHORS}.",
     ]
+    if seeds:
+        lines.append("Some parents were chosen because they can carry a specific idea about the product (shown "
+                     "after the arrow). For those, build names from the parent that hint at that idea without "
+                     "stating the product's category.")
+        for p in parents:
+            if p in seeds:
+                lines.append(f"- {p} -> {seeds[p]}")
     for p in parents:
         if existing and existing.get(p):
             lines.append(
@@ -126,9 +145,9 @@ def build_user_prompt(
                 f"improve on what makes these work): {', '.join(existing[p])}."
             )
     if best:
-        lines.append(f"Names our scorer rated highest so far (match their feel, do not copy): {', '.join(best)}.")
+        lines.append(f"Names rated highest so far (match their feel, do not copy): {', '.join(best)}.")
     if worst:
-        lines.append(f"Names it rated lowest (avoid this style): {', '.join(worst)}.")
+        lines.append(f"Names rated lowest (avoid this style): {', '.join(worst)}.")
     if rejected:
         lines.append(
             "Names our filters rejected recently, usually for being real words, hard to pronounce or crude: "
@@ -139,6 +158,8 @@ def build_user_prompt(
             "Recently dropped as one-letter respellings of names we already have (vary the idea or the "
             "structure, not a single letter): " + ", ".join(near) + "."
         )
+    if avoid:
+        lines.append(avoid)
     lines += [
         "",
         'Return a JSON array with one object per parent, in order: {"word": "<parent>", "names": ["...", "..."]}',
@@ -203,6 +224,8 @@ async def _propose(
     near: Sequence[str] = (),
     bar: Any = None,
     glosses: dict[str, str] | None = None,
+    avoid: str = "",
+    seeds: dict[str, str] | None = None,
 ) -> list[tuple[str, str]]:
     """Run the proposal requests concurrently. Returns raw (name, parent) pairs.
 
@@ -215,7 +238,7 @@ async def _propose(
     async with net.async_client(timeout=120.0) as http:
         async def one(chunk: list[str]) -> None:
             user = build_user_prompt(chunk, per_parent, min_len, max_len, best, worst, rejected, existing, near,
-                                     glosses)
+                                     glosses, avoid, seeds)
             async with sem:
                 parsed = await _ask(http, url, headers, model, system, user, temperature)
             for item in parsed or []:
@@ -261,10 +284,19 @@ def llm_batch(
     concurrency: int = 3,
     focus: Sequence[str] | None = None,
     bandit=None,
+    seeds: dict[str, tuple[int, str]] | None = None,
+    seed_share: float = 0.0,
 ) -> list[tuple[str, str]]:
-    """Ask the LLM for `count` new, gate-approved names and register them. Returns (name, parent) pairs."""
+    """Ask the LLM for `count` new, gate-approved names and register them. Returns (name, parent) pairs.
+
+    `seeds` maps base words to the idea they were retrieved for ({base: (idea id, idea text)}, from
+    `embed.idea_seeds`). With `seed_share` > 0, that share of the parents comes from the seeds, and the
+    prompt shows each seeded parent with its idea. Seeded names are stored with operator 'seed:<idea id>'.
+    """
     if count <= 0 or not ranked_words or budget.exhausted():
         return []
+    ranked_words = coin.unbanned(ranked_words)
+    seeds = {b: v for b, v in (seeds or {}).items() if not families.banned(b)}
     url = api_url or config.GEN_URL
     key = api_key or config.secret(config.GEN_KEY_ENV)
     model = model or config.COIN_MODEL
@@ -291,12 +323,18 @@ def llm_batch(
             chunks.append(_weighted_sample(pool, pool_w, per_chunk))
     else:
         picked: list[str] = []
+        n_seed = min(len(seeds), round(n_parents * seed_share)) if seeds and seed_share > 0 else 0
+        if n_seed:
+            picked += random.sample(sorted(seeds), n_seed)
         for w in random.choices(words, weights=weights, k=n_parents * 4):
-            if w not in picked:
-                picked.append(w)
             if len(picked) >= n_parents:
                 break
+            if w not in picked:
+                picked.append(w)
+        random.shuffle(picked)
         chunks = [picked[i : i + size] for i in range(0, len(picked), size)]
+    used = {p for c in chunks for p in c}
+    seed_text = {p: seeds[p][1] for p in used if p in seeds} if seeds and not focus else {}
 
     qv = config.QUESTION_VERSION
     with db.session(db_path) as conn:
@@ -305,13 +343,15 @@ def llm_batch(
         best, worst = feedback_examples(conn, qv, config.COIN_LLM_FEEDBACK, focus=focus)
         existing = parent_best(conn, qv, sorted({p for c in chunks for p in c})) if focus else None
         glosses = db.glosses(conn, sorted({p for c in chunks for p in c}))
+        gate = families.Gate(conn)
+        avoid = families.avoid_text(conn)
 
     with console.RichBar(f"LLM coining ({model.split('/')[-1]})", total=len(chunks),
                          unit="request", style="magenta") as bar:
         raw = asyncio.run(_propose(
             chunks, url, key, model, system, per_parent, min_len, max_len,
             best, worst, list(_RECENT_REJECTS), config.COIN_LLM_TEMPERATURE, concurrency, existing,
-            list(_RECENT_NEAR), bar, glosses,
+            list(_RECENT_NEAR), bar, glosses, avoid, seed_text,
         ))
 
     # shuffle first so the near-duplicate check does not always favour the first request's names
@@ -324,6 +364,8 @@ def llm_batch(
         if not coin.acceptable(w, min_len=min_len, max_len=max_len):
             if w not in _RECENT_REJECTS:
                 _RECENT_REJECTS.append(w)
+            continue
+        if not gate.check(w, (parent,)).ok:
             continue
         if not near.admit(w):
             if w not in _RECENT_NEAR:
@@ -338,17 +380,21 @@ def llm_batch(
         _SURVIVAL[slot] = min(0.8, max(0.08, 0.6 * _SURVIVAL[slot] + 0.4 * rate))
     pairs = list(accepted.items())[:count]
     print(f"[llm-coin] {len(chunks)} requests, {len(raw)} raw names, {near.dropped} near-duplicates dropped, "
-          f"{len(accepted)} passed gate+dedupe")
+          f"{len(accepted)} passed gate+dedupe"
+          + (f" ({len(seed_text)} parents seeded from ideas)" if seed_text else ""))
+    if gate.dropped:
+        print(f"[llm-coin] dropped {gate.summary()}")
     if not pairs:
         return []
 
     ts = coin._now()
     with db.session(db_path) as conn:
         for w, parent in pairs:
+            op = f"seed:{seeds[parent][0]}" if parent in seed_text else None
             conn.execute(
-                "INSERT OR IGNORE INTO words (word, pos, zipf, source, created_at, engine, parents) "
-                "VALUES (?, 'n', 3.0, 'coined', ?, 'llm', ?)",
-                (w, ts, parent),
+                "INSERT OR IGNORE INTO words (word, pos, zipf, source, created_at, engine, parents, operator) "
+                "VALUES (?, 'n', 3.0, 'coined', ?, 'llm', ?, ?)",
+                (w, ts, parent, op),
             )
         conn.commit()
     return pairs

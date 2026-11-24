@@ -67,10 +67,11 @@ DEFAULT_IDEAS_PROMPT = (
     "- Give 3 to 6 roots per idea, each with its language and literal meaning. AT LEAST HALF must be FAMILIAR: an "
     "English word or stem a journalist already recognises at a glance (image, copy, frame, trace, trail, source, "
     "origin, match, record, mirror, lens, stem, archive, light), because the names built from them must be "
-    "guessable without explanation. The rest may be classical roots (Latin or Greek), but only ones an educated "
-    "reader half-knows (lacuna, corpus, archive, vestige); an obscure root that needs explaining (rog-, "
-    "pakhus, syndesm-) is a poor choice. Prefer short roots (1 to 2 syllables). Do not invent roots or guess at "
-    "meanings you are unsure of."
+    "guessable without explanation. The rest may be classical roots (Latin or Greek), but only ones a reader knows "
+    "through a common English word (stemma from stem, vestigium from vestige, imago from image, archivum); "
+    "a root they would have to look up (hodos, fons, origo, rog-, pakhus, syndesm-) is a poor choice, however apt "
+    "its meaning. Prefer short roots (1 to 2 syllables). Do not invent roots or guess at meanings you are unsure "
+    "of."
 )
 
 IDEAS_USER = """Angle: {angle} ({desc})
