@@ -27,7 +27,7 @@ def _now() -> str:
 
 DEFAULT_SYSTEM_PROMPT = (
     "You are an expert brand naming strategist for a high-craft modern technology product.\n"
-    "Product: A fast, reliable software tool designed for clarity, deep insight, and quiet intellectual utility.\n\n"
+    "Product: {product}\n\n"
     "THE 'WHY' NARRATIVE BRIDGE RULE:\n"
     "A great brand name must have an intuitive conceptual bridge to what the product does.\n"
     "- Structure & Foundation (Loom, Lattice, Mesh, Nexus, Core, Grid) -> Evokes interconnected reliability.\n"
@@ -71,9 +71,14 @@ Return ONLY the raw JSON array. No markdown fences, no prose."""
 
 DEFAULT_ROOT_SYSTEM_PROMPT = (
     "You are an expert morphological and lexical root analyst for a software naming engine.\n"
-    "Product domain: Modern technology, developer utilities, and reliable data platforms.\n\n"
+    "Product: {product}\n\n"
     "TASK: Evaluate whether each candidate word is a POTENT CONCEPTUAL ROOT / BASE to coin brand names from.\n"
     "NOTE: Do NOT penalize a word for being an everyday noun or flat as a standalone name! Common, clean roots often form the most intuitive brand compounds.\n\n"
+    "CANDIDATE TYPES (some words come with a meaning line under the candidate list):\n"
+    "- Rare technical or abstract English words arrive with a short meaning. Judge the word by that meaning, not by a guess from its spelling.\n"
+    "- Foreign words arrive as \"Language: 'English meaning'\" (for example \"Italian/Spanish: 'phase'\"). Score what the word means for this product and how an English reader would see and say it. A foreign origin is not a flaw; never reject a word only because it is not English.\n"
+    "- DOUBLE MEANING bonus: a word from another field whose ordinary meaning there mirrors the product's mechanism can score 0.70-0.90 in fit even when it is not an obvious core word, provided it still reads as a precise term.\n"
+    "- LENGTH: roots of 9+ letters or 4+ syllables take prefixes and suffixes poorly and are hard to say. Keep natural at or below 0.5 for them unless the word is already excellent standalone.\n\n"
     "ROOT SCORING RUBRIC:\n"
     "- fit (float 0.0 to 1.0): Conceptual potency for structure, clarity, focus, depth, or utility.\n"
     "  - 0.85-0.98 (HIGH POTENCY): Strong, evocative roots (core, flow, node, link, prism, axis, lattice, trace, forge, lens, root).\n"
@@ -158,7 +163,8 @@ def spoken_review(word: str, item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-ROOT_SYSTEM_PROMPT = config.load_prompt("root_prompt.md", DEFAULT_ROOT_SYSTEM_PROMPT)
+ROOT_SYSTEM_PROMPT = config.load_prompt("root_prompt.md", DEFAULT_ROOT_SYSTEM_PROMPT).replace(
+    "{product}", config.PRODUCT_BLURB)
 BRAND_SYSTEM_PROMPT = config.load_prompt("system_prompt.md", DEFAULT_SYSTEM_PROMPT).replace(
     "{product}", config.PRODUCT_BLURB)   # the product brief, kept in one place
 OPENROUTER_SYSTEM_PROMPT = BRAND_SYSTEM_PROMPT

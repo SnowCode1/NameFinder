@@ -219,7 +219,7 @@ Names stop playing once they are clearly below the 100th best (--prune-rank, --z
                              "old names tagged elite/bulk so the groups can be compared (both); or the top --pool "
                              "names already rated plus any unrated idea/variant names, to confirm the leaders (rated)")
     p_tour.add_argument("--prune-below", default=None, metavar="WORD",
-                        help="stop playing names rated more than --margin below this name (e.g. origalia), once they "
+                        help="stop playing names rated more than --margin below this name (e.g. your benchmark name), once they "
                              "have --min-games games; reference names are never pruned")
     p_tour.add_argument("--prune-rank", type=int, default=100, metavar="N",
                         help="stop playing names that are clearly below the Nth best name: rating + --z standard "
@@ -262,8 +262,8 @@ Examples:
     pi_gen.add_argument("--per-angle", type=int, default=5,
                         help="base ideas per angle, scaled by each angle's weight (default: %(default)s)")
     pi_gen.add_argument("--angle", action="append", default=None, metavar="NAME",
-                        help="only this angle (repeatable): origin, spread, evidence, discovery, gaps, "
-                             "synthesis, inquiry, time, alteration, exploration")
+                        help="only this angle (repeatable); angles come from angles.txt in the prompt set, "
+                             "else the built-in mechanism, material, purpose, gaps, inquiry, history, exploration")
     pi_gen.add_argument("--no-merge", action="store_true",
                         help="do not merge near-duplicate ideas after generating")
     pi_gen.add_argument("--model", default=None, help="model id (default: OPENROUTER_IDEAS_MODEL, else the scoring model)")

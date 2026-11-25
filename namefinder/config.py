@@ -29,42 +29,35 @@ _load_env()
 DATA_DIR = ROOT / "data"
 RESULTS_DIR = ROOT / "results"
 IPGOD_DIR = DATA_DIR / "ipgod"
-PROMPTS_DIR = ROOT / "prompts"
+# Your prompt set: prompts/ by default (gitignored), or any folder named by NAMEFINDER_PROMPTS, such as the
+# worked example in examples/image-provenance. A file missing from the folder falls back to the built-in text.
+PROMPTS_DIR = Path(os.getenv("NAMEFINDER_PROMPTS") or (ROOT / "prompts"))
+if not PROMPTS_DIR.is_absolute():
+    PROMPTS_DIR = ROOT / PROMPTS_DIR
 DB_PATH = Path(os.getenv("NAMEFINDER_DB") or (DATA_DIR / "namefinder.db"))
 if not DB_PATH.is_absolute():
     DB_PATH = ROOT / DB_PATH
 
 
 def load_prompt(filename: str, default: str) -> str:
-    """Load prompt from prompts/<filename>, falling back to .example, then default."""
+    """The text of PROMPTS_DIR/<filename>, or `default` when the file is missing or empty."""
     p = PROMPTS_DIR / filename
-    if p.exists():
-        try:
-            return p.read_text(encoding="utf-8").strip()
-        except OSError:
-            pass
-    p_ex = PROMPTS_DIR / (filename.replace(".md", ".example.md").replace(".txt", ".example.txt"))
-    if p_ex.exists():
-        try:
-            return p_ex.read_text(encoding="utf-8").strip()
-        except OSError:
-            pass
-    return default.strip()
+    try:
+        text = p.read_text(encoding="utf-8").strip()
+    except OSError:
+        text = ""
+    return text or default.strip()
+
+
+def load_list(filename: str, default: tuple[str, ...] = ()) -> tuple[str, ...]:
+    """Non-empty lines of PROMPTS_DIR/<filename> with '#' comments removed, or `default` if there are none."""
+    lines = [ln.split("#", 1)[0].strip() for ln in load_prompt(filename, "").splitlines()]
+    return tuple(ln for ln in lines if ln) or default
 
 
 def load_concept_roots(default: tuple[str, ...]) -> tuple[str, ...]:
-    """Load concept roots from prompts/concept_roots.txt or fallback."""
-    p = PROMPTS_DIR / "concept_roots.txt"
-    if not p.exists():
-        p = PROMPTS_DIR / "concept_roots.example.txt"
-    if p.exists():
-        try:
-            lines = [line.strip().lower() for line in p.read_text(encoding="utf-8").splitlines() if line.strip()]
-            if lines:
-                return tuple(lines)
-        except OSError:
-            pass
-    return default
+    """Concept roots for portmanteaus and compounds: PROMPTS_DIR/concept_roots.txt, one per line."""
+    return tuple(w.lower() for w in load_list("concept_roots.txt")) or default
 
 
 # --- secrets ---------------------------------------------------------------
@@ -89,9 +82,9 @@ def secret(name: str) -> str | None:
 
 # --- product context (shared Jev state, per the TypeSafe skill) ------------
 PRODUCT_NAME = "the product"
-# The real product brief is private: prompts/product.md (gitignored), else product.example.md.
+# The product brief: PROMPTS_DIR/product.md. Every generation, scoring and judging prompt includes it.
 DEFAULT_PRODUCT_BLURB = (
-    "A software verification tool: a record of where an image first appeared and every copy and edit since. "
+    "A software product (no brief yet: describe yours in prompts/product.md). "
     "The voice is technical and plain, with no hype; names should sound like a sober technical term."
 )
 PRODUCT_BLURB = load_prompt("product.md", DEFAULT_PRODUCT_BLURB)
@@ -194,7 +187,7 @@ WEIGHTS = {
 # "Verbability": does it work as a verb in "I just ___ it and found what I needed"
 # (google it, ping it, grep it)? Applied as a slight multiplicative bonus on brand
 # composites: composite *= (1 - VERB_BONUS) + VERB_BONUS * verbable. Unrated words count as 0.5.
-# Off since 2026-11-24: the rated names favour term-like nouns (vestigome, stemmagram), not verbs.
+# Off since 2026-11-24: hand ratings favoured term-like nouns (in the manner of genome, lexicon), not verbs.
 VERB_BONUS = 0.0
 SCORE_FATAL_NEG = 0.5   # brand scoring: a name the scorer marks with a fatal flaw gets at least this "neg"
 TAKEN_DAMP = 0.75     # weight of "already a known software brand"
@@ -266,13 +259,22 @@ COIN_BLOCK_SUBSTRINGS = (
 )
 COIN_BLOCK_EDGES = ("sex",)  # blocked only at the start or end of a word
 # Hard bans (namefinder/families.py), checked in coin.acceptable so every engine obeys them and named in every
-# generation prompt. verit/truth/proof/authent/
-# genuin: verdict words, but the tool shows a record, not a ruling on authenticity. forens/deep-: read
-# like police forensics or deepfake detection. Existing names are kept in the database; banned ones leave the tournament pool.
-# orig- was banned until 2026-11-24 and lifted: rated names such as origalia, origadex and suborigal reach B.
-BANNED_ROOTS = ("verit", "truth", "proof", "authent", "genuin", "forens")
-BANNED_PREFIXES = ("deep",)
-BANNED_ENDINGS: tuple[str, ...] = ()
+# generation prompt: roots, prefixes and endings no new name may use, read from PROMPTS_DIR/bans.txt as lines
+# such as `root proof`, `prefix deep` or `ending ify`. Existing names stay in the database; banned ones leave the
+# tournament pool.
+def _load_bans() -> dict[str, tuple[str, ...]]:
+    bans: dict[str, list[str]] = {"root": [], "prefix": [], "ending": []}
+    for line in load_list("bans.txt"):
+        kind, _, value = line.partition(" ")
+        if kind.lower() in bans and value.strip():
+            bans[kind.lower()].append(value.strip().lower().strip("-"))
+    return {k: tuple(v) for k, v in bans.items()}
+
+
+_BANS = _load_bans()
+BANNED_ROOTS: tuple[str, ...] = _BANS["root"]
+BANNED_PREFIXES: tuple[str, ...] = _BANS["prefix"]
+BANNED_ENDINGS: tuple[str, ...] = _BANS["ending"]
 # Family saturation: a family (first 4 letters, or a known ending such as -ome) holding at least FAMILY_SHARE
 # of the best FAMILY_TOP names (and at least FAMILY_MIN of them) is overused. Generation prompts name the
 # overused families, and only FAMILY_KEEP of new names in one survive the gate.
@@ -282,8 +284,8 @@ FAMILY_SHARE = 0.06
 FAMILY_MIN = 4
 FAMILY_KEEP = 0.15
 FAMILY_POOL_SHARE = 0.04     # tournament pool: at most this share of the pool (and at least 4) per family
-# Endings never treated as overused: the scientific endings the rated taste is built on (vestigome,
-# stemmagram). Openings (vest-, stem-) still saturate, so one root cannot take over.
+# Endings never treated as overused: the scientific endings that term-like names are built on (genome,
+# telegram). Openings still saturate, so one root cannot take over.
 FAMILY_FREE_ENDINGS = ("-ome", "-gram", "-eme", "-dex")
 # Collisions (families.collisions): spelling or sound similarity to a term in prompts/collision_terms.txt
 # (competitors, field vocabulary, well-known brands) at or above this rejects a new name.
@@ -316,7 +318,7 @@ COIN_TRUNC_MIN_CLIP = 3      # ...and keeps at least this many letters, in whole
 COIN_COMPOUND_MAX_PART = 6   # compound engine: each whole word is at most this long
 COIN_SUFFIXES = ("ex", "um", "os", "ia", "is", "ix", "us", "on", "am", "im", "x")
 # Verb-likeness steering for the coining engines
-# All neutral since 2026-11-24 (the rated taste does not reward verb-like names); old values 1.0, 0.35, 0.30, 1.0.
+# All neutral since 2026-11-24 (hand ratings did not reward verb-like names); old values 1.0, 0.35, 0.30, 1.0.
 COIN_VERB_PARENT_BOOST = 0.0   # verb-like parents are up to (1 + boost)x as likely to be picked
 COIN_VERB_FLOOR = 1.0          # a candidate with verb_score 0 is kept with this probability (1.0 = no bias)
 COIN_VERB_SPLICE_WEIGHT = 0.0  # weight of verb_score when choosing among splice options
@@ -427,14 +429,12 @@ EMBED_BATCH = 200            # texts per request
 EMBED_CONCURRENCY = 6
 EMBED_SEEDS_PER_IDEA = 12    # base words retrieved per approved idea
 # Retrieval and obliqueness subtract this much of a text's similarity to the category anchors, so a base
-# that hints at an idea ("trail" for "every copy back to the first upload") beats one that names the category ("photo").
-# 0.5 until 2026-11-24; lowered because the rated taste accepts literal structure roots (stemma, vestigium, orig-).
+# that hints at an idea beats one that only names the product's category. 0.5 until 2026-11-24; lowered after
+# hand ratings showed that literal structure roots make good names when the term is well made.
 EMBED_CATEGORY_WEIGHT = 0.2
-# What the product literally is. A name close to these describes the category instead of hinting at it.
-EMBED_CATEGORY_ANCHORS = (
-    "photo", "image verification", "fact-checking", "fake image detection", "reverse image search",
-    "photo forensics", "metadata", "proof of authenticity", "deepfake",
-)
+# What the product literally is (PROMPTS_DIR/category_anchors.txt, one phrase per line). A name close to these
+# describes the category instead of hinting at it. Empty: no category penalty.
+EMBED_CATEGORY_ANCHORS: tuple[str, ...] = load_list("category_anchors.txt")
 
 # Per-command spend cap in USD for paid API calls (0 disables). Override with --max-cost.
 MAX_COST = float(os.getenv("NAMEFINDER_MAX_COST", "1.0"))

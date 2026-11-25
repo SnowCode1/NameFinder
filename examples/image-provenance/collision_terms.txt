@@ -1,0 +1,8 @@
+# Terms a new name must not look or sound like (namefinder/families.py). Several per line, '#' comments.
+# competitors and adjacent products
+tineye truepic sensity invid fotoforensics forensically pimeyes clearview
+getty shutterstock alamy flickr imgur pinterest
+# field vocabulary a name should not echo
+photogram pictogram hologram histogram provenance forensics metadata stemma
+# well-known brands
+instagram polaroid pokedex rolodex kleenex kodak

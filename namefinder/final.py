@@ -20,7 +20,7 @@ from . import config, db, net
 
 DEFAULT_FINAL_SYSTEM_PROMPT = (
     "You are an expert brand naming strategist for modern technology products.\n"
-    "Product: A fast, reliable software tool designed for clarity, deep insight, and quiet intellectual utility.\n"
+    "Product: {product}\n"
     "Target aesthetic: calm, formidable, quiet utility — like Obsidian, Stripe, Linear, or Raycast. No corporate hype, no cheesy clichés.\n"
     "THE NARRATIVE BRIDGE RULE: Reward names with an intuitive conceptual bridge to clarity, structure, focus, depth, or logical precision. "
     "Penalize disjointed or overly generic metaphors."
@@ -39,7 +39,7 @@ Return a JSON array, one object per candidate, in the same order, with exactly t
 
 Return only the JSON array. No prose, no code fences."""
 
-SYSTEM_PROMPT = config.load_prompt("final_system_prompt.md", DEFAULT_FINAL_SYSTEM_PROMPT)
+SYSTEM_PROMPT = config.load_prompt("final_system_prompt.md", DEFAULT_FINAL_SYSTEM_PROMPT).replace("{product}", config.PRODUCT_BLURB)
 USER_TEMPLATE = config.load_prompt("final_user_prompt.md", DEFAULT_FINAL_USER_TEMPLATE)
 
 

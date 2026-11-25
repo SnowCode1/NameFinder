@@ -23,16 +23,17 @@ Python CLI pipeline for brand-name discovery: prepare vocabulary, score with an 
 - `namefinder/ratings.py` - Plackett-Luce fit (with standard errors) over a judge's logged matches; the tournament refits it after every round and prunes on it
 - `namefinder/budget.py` - per-command OpenRouter spend tracking and `--max-cost` limit
 - `namefinder/console.py` - terminal UI
-- `prompts/*.md` - private, gitignored prompts (see `*.example.md`); `prompts/product.md` is the product brief (`config.PRODUCT_BLURB`) that refine and the built-in LLM coin prompt read
+- Prompt set: `prompts/` (gitignored, the user's own) or the folder in `NAMEFINDER_PROMPTS`; `config.load_prompt` reads a file from it or falls back to the built-in text. `product.md` is the brief (`config.PRODUCT_BLURB`, `{product}` in every built-in prompt); `angles.txt`, `bans.txt`, `category_anchors.txt`, `collision_terms.txt`, `concept_roots.txt`, `taste.txt`, `tournament_refs.txt` are optional lists
+- `examples/image-provenance/` - complete worked prompt set for an invented product; the README demo ran on it (`NAMEFINDER_PROMPTS=examples/image-provenance NAMEFINDER_DB=data/demo.db`)
 - `docs/` - local, gitignored notes
 
 ## Key facts
 - `words.source` is `wordfreq` (dictionary base), `lexicon` (extra base layers from `namefinder lexicon`; `words.lexicon` names the layer, `words.gloss` holds a WordNet meaning shown to the root scorer) or `coined`.
 - `words.parents` on coined words is `base` or `base,partner`; the first entry is the base that `bases.py` credits.
 - Each brand score's `raw` JSON stores `"prompt"`, a fingerprint of the scoring prompts (`score.prompt_fingerprint`); `rescore` re-scores coined names whose fingerprint is stale.
-- The naming objective follows your ratings in `prompts/taste.txt` (since 2026-11-24): a sober technical term that ought to exist (vestigome, stemmagram), built from a classical root the reader half-knows plus a standard ending; literal structure roots and orig- are acceptable. The earlier oblique objective (trailsift over -ome/-gram) agreed with the ratings less than chance. Measure prompt changes with `namefinder taste --eval` (judge) or `--scorer` (brand scorer) and never use `[held out]` names as prompt examples. Previous private prompts are archived in `prompts/archive/` (gitignored).
+- The built-in judge and naming rules favour a sober technical term that ought to exist: a classical root the reader half-knows plus a standard ending. Hand ratings showed this beat an earlier oblique objective, which agreed with them less than chance. Measure prompt changes with `namefinder taste --eval` (judge) or `--scorer` (brand scorer) and never use `[held out]` names as prompt examples.
 - `score --clear` backs up the DB to `data/backups/`, then deletes all scores and coined words. `score` skips coined words unless `--mode brand`.
-- Secrets live in `.env` (gitignored). Never commit `.env`, `data/`, `results/` or private prompts.
+- Secrets live in `.env` (gitignored). Never commit `.env`, `data/`, `results/` or anything in `prompts/`.
 
 ## Commands
 - Install: `pip install -e .` (venv in `.venv`)

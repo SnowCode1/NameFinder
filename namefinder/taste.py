@@ -103,7 +103,7 @@ def _miss_text(labels: dict[str, int], misses: Sequence[tuple[str, str]], k: int
 def _no_labels(path: Path | None) -> None:
     p = path or config.PROMPTS_DIR / "taste.txt"
     console.log(f"[taste] no rated names in {p}. Add lines like `vestigome A  # why` (tiers A-D); "
-                "see prompts/taste.example.txt.")
+                "see examples/image-provenance/taste.txt.")
 
 
 def report(db_path=None, path: Path | None = None) -> None:

@@ -1,0 +1,9 @@
+# What the product literally is. Idea seeds are penalised for sitting close to these, so a base word that
+# hints at an idea ("trail" for "every copy back to the first upload") beats one that names the category.
+photo
+image verification
+fact-checking
+fake image detection
+reverse image search
+photo forensics
+metadata

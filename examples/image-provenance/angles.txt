@@ -1,0 +1,11 @@
+# Idea angles for `namefinder ideas generate`: name | weight | what the angle covers.
+# The weight scales --per-angle, so central angles get more ideas and minor ones fewer.
+origin      | 1.2 | where an image began: the first upload, the original capture, what came before every copy
+spread      | 1.0 | how a picture travels: every route from the first upload to a viral copy, reposts, networks of sites
+evidence    | 1.0 | matches and their support: visual similarity, metadata, timestamps, archive captures, who posted what
+discovery   | 1.2 | PURPOSE: finding what no single search shows: a crop of a crop, the copy that came first
+gaps        | 1.2 | PURPOSE: what the record does not yet show: where the trail goes cold, conflicting dates, copies with no known source
+lineage     | 1.0 | the family tree of copies: parents and descendants, branches, the stem the copies grow from
+inquiry     | 1.0 | CORE FEATURE: asking the record in plain language; an agent that answers by querying the matches
+alteration  | 0.4 | MINOR: typed edits (crop, filter, splice, recaption) and what changed between a copy and its parent
+exploration | 0.4 | MINOR: seeing the family tree laid out and navigating where an image went

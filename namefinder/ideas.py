@@ -1,11 +1,11 @@
 """Stage 1 of idea-first naming: generate ideas, merge duplicates, then review them by hand.
 
 An idea is one statement that is true of the product, plus the roots (Latin or Greek by default) that
-could carry it into a name, for example "every copy has a parent" with stemma, propago, gens.
-Ideas come at two levels: MECHANISM (how the product works) and PURPOSE (what it lets a journalist do
-or understand: where a picture came from, where the trail goes cold). Ideas are generated per angle,
-weighted toward the product's identity, then near-duplicates are merged (their root lists are united),
-and only `approved` ideas feed name generation (`namefinder generate`).
+could carry it into a name, for example "every copy has a parent" with stemma, propago, gens for an image
+provenance tool. Ideas come at two levels: MECHANISM (how the product works) and PURPOSE (what it lets its
+user do or understand). Ideas are generated per angle (`angles.txt` in the prompt set, else a built-in
+generic set), weighted toward the product's identity, then near-duplicates are merged (their root lists are
+united), and only `approved` ideas feed name generation (`namefinder generate`).
 """
 
 from __future__ import annotations
@@ -25,24 +25,34 @@ from . import budget, config, console, db, llm, net
 DEFAULT_PER_ANGLE = 5
 MAX_ROOTS = 12
 
-# (name, description, weight). The weight scales --per-angle: central angles get more ideas, data-feature
-# angles fewer. One request per angle keeps the idea set varied.
-ANGLES: tuple[tuple[str, str, float], ...] = (
-    ("origin", "where an image began: the first upload, the original capture, the camera, what came before every copy", 1.2),
-    ("spread", "how a picture travels: every route from the first upload to a viral copy, reposts, shares, networks of sites", 1.0),
-    ("evidence", "matches and their support: visual similarity, metadata, timestamps, archive captures, a record of who posted what", 1.0),
-    ("discovery", "PURPOSE: finding what no single search shows: a crop of a crop, an edit of an edit, "
-                  "the copy that came first, links a person would not notice checking one site at a time", 1.2),
-    ("gaps", "PURPOSE: what the record does not yet show: where the trail goes cold or dates conflict, open questions, "
-                 "copies with no known source, gaps in the archive, and helping people see them", 1.2),
-    ("synthesis", "gathering two kinds of source (news archives and social platforms) into one reference: an index, a catalogue, an archive", 0.8),
-    ("inquiry", "CORE FEATURE: asking the record in plain language: questions, queries, inquiry, an agent that answers "
-                "by querying the matches, the act of investigating an image", 1.2),
-    ("time", "MINOR: precedence (which copy came first). Dates are only a data field; "
-             "propose an idea here only if it says something about the history of an image", 0.4),
-    ("alteration", "MINOR: typed edits: crop, filter, splice, recaption; what changed between a copy and its parent", 0.4),
-    ("exploration", "MINOR: seeing and navigating structure: a family tree of copies laid out and explored, a map of where an image went", 0.4),
+# (name, description, weight). The weight scales --per-angle: central angles get more ideas, minor ones fewer.
+# One request per angle keeps the idea set varied. A prompt set replaces these with `angles.txt`, one angle
+# per line: `name | weight | description`.
+DEFAULT_ANGLES: tuple[tuple[str, str, float], ...] = (
+    ("mechanism", "how the product works: its data, its structure, the operations it performs", 1.2),
+    ("material", "what it works on or holds: the objects, records or signals at its centre", 1.0),
+    ("purpose", "PURPOSE: what its user can do or understand with it that they could not easily do before", 1.2),
+    ("gaps", "PURPOSE: what it makes visible that was hidden: absences, conflicts, open questions", 1.0),
+    ("inquiry", "how a person asks it things or investigates with it", 0.8),
+    ("history", "MINOR: time, precedence and change, only where they say something about the product", 0.4),
+    ("exploration", "MINOR: seeing and navigating what it holds: a map, a layout, a view", 0.4),
 )
+
+
+def _load_angles() -> tuple[tuple[str, str, float], ...]:
+    out = []
+    for line in config.load_list("angles.txt"):
+        parts = [p.strip() for p in line.split("|", 2)]
+        if len(parts) != 3 or not parts[0]:
+            continue
+        try:
+            out.append((parts[0], parts[2], float(parts[1])))
+        except ValueError:
+            continue
+    return tuple(out) or DEFAULT_ANGLES
+
+
+ANGLES = _load_angles()
 
 DEFAULT_IDEAS_PROMPT = (
     "You are a brand-naming linguist preparing the raw material for names, before any name exists.\n"
@@ -50,28 +60,22 @@ DEFAULT_IDEAS_PROMPT = (
     "Your job is to propose IDEAS: each is one short statement, plus the roots (Latin or Greek by default; another "
     "language only when it carries the idea markedly better) that could carry it into a coined word, in the manner "
     "of codex, lexicon, phoneme, genome, syntax. Ideas come at two levels, and both are welcome:\n"
-    "- MECHANISM: something true of how the product works (matches, copies, edits, sources).\n"
-    "- PURPOSE: something true of what the product is FOR: what a journalist can do or understand with it that "
-    "they could not easily do before. Go further than the mechanics here. For example it can make visible what "
-    "the record does not yet show (where the trail goes cold, where dates conflict, which copies have no known "
-    "source), and so help people see what is not yet known about an image.\n"
-    "Honesty: the tool does not rule on whether an image is real; it helps a person see, ask and notice. "
-    "Phrase purposes as what it helps a person do, never as certainty, truth or breakthroughs.\n\n"
+    "- MECHANISM: something true of how the product works, as the description above states it.\n"
+    "- PURPOSE: something true of what the product is FOR: what its user can do or understand with it that "
+    "they could not easily do before. Go further than the mechanics here.\n"
+    "Honesty: claim only what the description supports. Phrase purposes as what it helps a person do, never as "
+    "certainty, truth or breakthroughs, and respect anything the description says the product is not.\n\n"
     "Rules:\n"
-    "- Never frame an idea as catching fakes or issuing verdicts: this is not a deepfake detector or a "
-    "lie detector.\n"
-    "- Plain and technical, like a verification desk's notes. No hype, no marketing language.\n"
+    "- Plain and technical, in the voice the description asks for. No hype, no marketing language.\n"
     "- Each idea must differ in SUBSTANCE (a different fact or purpose) from the others in your answer and from "
     "all the existing ideas you are shown, not merely in wording or angle. Two ideas that make the same point "
     "with different roots are one idea: put the extra roots in the same idea instead.\n"
     "- Give 3 to 6 roots per idea, each with its language and literal meaning. AT LEAST HALF must be FAMILIAR: an "
-    "English word or stem a journalist already recognises at a glance (image, copy, frame, trace, trail, source, "
-    "origin, match, record, mirror, lens, stem, archive, light), because the names built from them must be "
-    "guessable without explanation. The rest may be classical roots (Latin or Greek), but only ones a reader knows "
-    "through a common English word (stemma from stem, vestigium from vestige, imago from image, archivum); "
-    "a root they would have to look up (hodos, fons, origo, rog-, pakhus, syndesm-) is a poor choice, however apt "
-    "its meaning. Prefer short roots (1 to 2 syllables). Do not invent roots or guess at meanings you are unsure "
-    "of."
+    "English word or stem the product's audience already recognises at a glance, because the names built from "
+    "them must be guessable without explanation. The rest may be classical roots (Latin or Greek), but only ones "
+    "a reader knows through a common English word (corpus, lexicon, nexus, vestige from vestigium); a root they "
+    "would have to look up (hodos, fons, origo, rog-, pakhus, syndesm-) is a poor choice, however apt its "
+    "meaning. Prefer short roots (1 to 2 syllables). Do not invent roots or guess at meanings you are unsure of."
 )
 
 IDEAS_USER = """Angle: {angle} ({desc})
@@ -79,7 +83,7 @@ IDEAS_USER = """Angle: {angle} ({desc})
 Propose {n} ideas for this angle.
 {existing}
 Return ONLY a JSON array, no prose or fences, of objects in this form:
-{{"idea": "one statement, at most 25 words", "roots": [{{"root": "stemma", "language": "Greek", "meaning": "garland; a family tree of copies"}}]}}"""
+{{"idea": "one statement, at most 25 words", "roots": [{{"root": "nexus", "language": "Latin", "meaning": "a binding together"}}]}}"""
 
 MERGE_SYSTEM = (
     "You curate a list of naming ideas for one product. Two ideas are DUPLICATES when they make the same point "

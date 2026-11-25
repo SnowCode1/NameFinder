@@ -1,0 +1,10 @@
+# Hard bans: no generated name may contain these. One per line: `root X`, `prefix X` or `ending X`.
+# Verdict words: the tool shows a record, not a ruling on authenticity.
+root verit
+root truth
+root proof
+root authent
+root genuin
+# Reads as police forensics or deepfake detection.
+root forens
+prefix deep

@@ -20,7 +20,7 @@ DEFAULT_VARIANTS = 4
 PARENTS_PER_REQUEST = 4
 
 DEFAULT_EVOLVE_PROMPT = (
-    "You are a brand-naming linguist improving names for an image provenance product.\n"
+    "You are a brand-naming linguist improving names for a software product.\n"
     "Product: {product}\n\n"
     "You will be given names that a judge has ranked among the best so far, each with the flaws the judge "
     "named. For every name, invent variants that KEEP WHAT WORKS (its root and the idea it carries) and FIX THE "

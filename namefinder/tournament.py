@@ -7,7 +7,7 @@ returns a best-to-worst ranking plus one short flaw per name. Rankings become pa
 Ratings are stored per `judge` = "<model>|<prompt hash>": switching the judge model or editing
 `prompts/tournament_prompt.md` starts a fresh rating set, and the old one stays in the database.
 Reference names (`prompts/tournament_refs.txt`, `--ref`) always enter, even when they are not in
-`words`, so a rating reads as "better or worse than origalia".
+`words`, so a rating reads as "better or worse than a name you already know".
 """
 
 from __future__ import annotations
@@ -40,29 +40,39 @@ DEFAULT_JUDGE_PROMPT = (
     "For each name, in order:\n"
     "1. Read it as a stranger sees it once, in lowercase: where does the eye split it, and does every part "
     "have a vowel to say? A name that cannot be read aloud on sight fails, whatever it means.\n"
-    "2. Say it: how most English readers would pronounce it, with the stressed syllable.\n"
-    "3. Story: the short, TRUE answer to 'why is it called that?' in this product's terms, one a journalist "
-    "would repeat to a colleague. Write 'none' if it takes a stretch.\n"
+    "2. Say it: how most English readers would pronounce it, with the stressed syllable. Notice whether the "
+    "ending sounds natural on its root or odd.\n"
+    "3. Story: the short, TRUE answer to 'why is it called that?', naming the root and what it means in this "
+    "product's terms. Write 'none' if the root is one a reader would have to look up, or the story takes a "
+    "stretch.\n"
     "4. Fatal flaw, if it has one (see below).\n\n"
-    "Then rank, weighing roughly in this order:\n"
-    "- It reads and says cleanly on first sight and is spelled the way it sounds.\n"
-    "- Its story hints from the side at what a journalist does or sees with the product, rather than naming "
-    "the category (photo, image, picture, verify, fake, forensic). A literal category name is generic, sits "
-    "close to existing products (TinEye, Truepic) and should rank below an equally clean oblique one. A name "
-    "earns nothing for merely containing a word from the product description; the story has to hold up.\n"
-    "- It sounds like a word that could already exist: a recognisable root in a natural shape. A classical "
-    "ending (-al, -on, -um, -ome) on a root that carries the idea is fine; it is generic only when bolted onto "
-    "a category word or onto a root that means nothing here.\n"
-    "- It fits the plain technical voice: no hype, no cute or decorative metaphor, no overclaiming (certainty, "
-    "discovery, answers on its own). Words of verdict (verity, truth, proof, authentic, genuine) are wrong in "
-    "meaning: the tool shows a record, not a ruling.\n\n"
+    "Reward, strongest first:\n"
+    "- A name that sounds like a sober technical term that ought to already exist (codex, lexicon, genome, "
+    "nexus): a classical root with a standard ending or prefix, formed the way real terms are formed.\n"
+    "- A root the reader already half-knows through a common English word, naming the product's structure or "
+    "its work as the description states it. Being literal about the structure is fine when the term is well "
+    "made; a name earns nothing for merely containing a word from the description, the story has to hold up.\n"
+    "- An ending that sounds right on its root. Judge it by ear: scientific endings (-gram, -ome, -us, -eme, "
+    "-ix, -dex) often do; an arbitrary Latin ending bolted onto a root (-an, -on, -um) often sounds wrong.\n"
+    "- Length is no problem: four syllables are fine when the name says cleanly.\n"
+    "- A plain English compound can be good when both halves are strong and the story is true, but it seldom "
+    "beats a well-made term.\n\n"
+    "Mark down, strongest first:\n"
+    "- A root the reader would have to look up (hodos, fons, origo), so the name has no story on sight.\n"
+    "- A soft or generic half that adds nothing (-span, -map, -field, -carry), or two clipped half-words jammed "
+    "together.\n"
+    "- A reading that points away from the product the description defines, or breaks its voice: hype, a cute "
+    "question compound (why-, how-), a decorative metaphor (weave, braid, prism, loom), or an overclaim "
+    "(certainty, truth, answers on its own).\n"
+    "- Anything archaic, clinical, or that sounds like a drug.\n\n"
     "Fatal flaws (code ranks a name with one below every name without one, so use them only when certain):\n"
     "- unreadable: a reader cannot say it on sight (it ends or breaks on consonants with no vowel, or its "
     "letters do not say what they spell).\n"
     "- misspelling: it reads as a misspelling of a real word, or is heard as one, including a field term.\n"
-    "- brand echo: it sounds like, or sits one letter from, a well-known brand in any sector.\n"
-    "- wrong meaning: its obvious reading points to a different product (photo editing, surveillance, medicine, a "
-    "consumer app) or says something false about this one.\n"
+    "- brand echo: it sounds like, or sits one letter from, a well-known brand in any sector. Sharing a common "
+    "root with a brand is not an echo; the whole name must sound like the brand.\n"
+    "- wrong meaning: its obvious reading points to a different kind of product or says something false about "
+    "this one.\n"
     "Everything else is 'none': a weak story or a so-so sound is a flaw, not a fatal one.\n"
     "Be decisive and comparative: no ties. Ignore the order the names are shown in."
 )
@@ -519,7 +529,7 @@ def ranking_rows(
 
 
 def _benchmark(rows: Sequence[dict[str, Any]], refs: Sequence[str]) -> tuple[str | None, float | None]:
-    """The first reference name that has a rating (origalia, if listed first), and its rating."""
+    """The first reference name that has a rating (list your benchmark name first), and its rating."""
     by = {r["word"]: r["rating"] for r in rows}
     for w in refs:
         if w in by:

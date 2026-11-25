@@ -45,12 +45,9 @@ desktop.ini
 # Corpora / Downloaded models
 nltk_data/
 
-# Private brand definitions & calibrated prompts
-prompts/*.md
-prompts/*.txt
-!prompts/*.example.md
-!prompts/*.example.txt
-prompts/archive/
+# Your own prompt set (product brief, ratings, judge prompt): never committed.
+# The shareable worked example lives in examples/.
+/prompts/
 
 # Local documentation & Claude Code local settings
 docs/

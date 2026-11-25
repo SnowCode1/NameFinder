@@ -6,7 +6,7 @@ unit-normalised and stored as float32 keyed by the exact text embedded, so nothi
 What they are used for:
 - Idea seeds (`idea_seeds`): for every approved idea, the base words (dictionary and lexicon layers,
   embedded with their gloss) closest in meaning to it, minus EMBED_CATEGORY_WEIGHT x their closeness to
-  the category anchors (photo, image verification, fact-checking...). `coin` gives part of the LLM engine's parents
+  the category anchors (`category_anchors.txt`: phrases that name what the product literally is). `coin` gives part of the LLM engine's parents
   from these seeds, each shown with its idea, so the cheap high-volume loop explores the product's features
   instead of its category word. Seeded names carry operator 'seed:<idea id>' (`engines --by operator`).
 - Obliqueness (`obliqueness`): a name's closeness to the ideas minus its closeness to the category anchors.

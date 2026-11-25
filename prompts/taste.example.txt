@@ -1,8 +1,0 @@
-# Your own ratings, read by `namefinder taste`. Copy to prompts/taste.txt (gitignored).
-# One name per line: name, tier, optional reason after '#'.
-#   A = would ship it   B = good   C = meh   D = reject   ? = not rated yet (ignored)
-# Reasons are for you (and for writing prompt examples later); the tier is what is measured.
-# Rate 40+ names across all four tiers; the more D names the judge likes, the more they teach.
-lumenfold   A   # says cleanly, true story
-gridwick    C   # fine sound, story is a stretch
-brightln    D   # cannot be read aloud

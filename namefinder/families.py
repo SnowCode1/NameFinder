@@ -273,13 +273,9 @@ def similarity(a: str, b: str) -> float:
 
 # --- collisions with reference terms ---------------------------------------
 DEFAULT_COLLISION_TERMS = """
-# competitors and adjacent products
-tineye truepic sensity invid fotoforensics forensically pimeyes clearview reversee
-getty shutterstock alamy flickr imgur pinterest
-# field vocabulary a name should not echo
-photogram pictogram hologram histogram provenance forensics metadata
-# well-known brands and words named in the prompts
-instagram polaroid pokedex rolodex kleenex playtex
+# Used only when the prompt set has no collision_terms.txt. List your competitors and the field's own
+# vocabulary there; these are well-known brands that sit close to common coining patterns.
+google kleenex pokedex rolodex netflix spotify xerox tesla nexus codex
 """
 
 
