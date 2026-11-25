@@ -1,5 +1,7 @@
 # NameFinder
 
+[![tests](https://github.com/SnowCode1/NameFinder/actions/workflows/tests.yml/badge.svg)](https://github.com/SnowCode1/NameFinder/actions/workflows/tests.yml)
+
 A command-line pipeline that finds a coined brand name for a software product. It turns a written product brief into naming ideas, invents candidate names from them, ranks the candidates against each other with an LLM judge, checks `.com` availability and trademarks, and measures how well the whole process agrees with your own taste.
 
 Every stage is resumable (SQLite in WAL mode), every paid call is cost-capped, and the domain and trademark screens need no API keys.
@@ -17,6 +19,7 @@ Every stage is resumable (SQLite in WAL mode), every paid call is cost-capped, a
 - [The workflow, command by command](#the-workflow-command-by-command)
 - [What was measured along the way](#what-was-measured-along-the-way)
 - [Project layout](#project-layout)
+- [Tests](#tests)
 - [Limitations](#limitations)
 
 ## How it works
@@ -280,8 +283,18 @@ namefinder/
   budget.py, llm.py, net.py, console.py
                     spend limits, shared LLM call, HTTP pacing and retries, terminal UI
 examples/image-provenance/   the worked example's prompt set
+tests/                       pytest suite (no network or API key)
 USAGE.md                     full command reference
 ```
+
+## Tests
+
+```bash
+pip install -e ".[test]"
+pytest
+```
+
+The suite covers the deterministic core and needs no API key or network: the Plackett-Luce fit (including recovery of known strengths from simulated rankings), taste agreement and held-out handling, sound keys, collisions, bans and family saturation, readability and the coining gate, prompt-set loading and fallbacks (and that every built-in prompt is product-neutral), the worked example's files, the database layer and the CLI parser. It runs against an empty prompt set and a throwaway database, on Linux and Windows, in CI.
 
 ## Limitations
 

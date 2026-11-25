@@ -36,7 +36,8 @@ Python CLI pipeline for brand-name discovery: prepare vocabulary, score with an 
 - Secrets live in `.env` (gitignored). Never commit `.env`, `data/`, `results/` or anything in `prompts/`.
 
 ## Commands
-- Install: `pip install -e .` (venv in `.venv`)
+- Install: `pip install -e ".[test]"` (venv in `.venv`)
+- Test: `pytest` (runs against an empty prompt set and a temp DB; CI in `.github/workflows/tests.yml`)
 - Run: `namefinder <command>`; see `USAGE.md`
 
 ## Git conventions
