@@ -1,0 +1,38 @@
+# Hand ratings for `namefinder taste`: name, tier, optional reason after '#'.
+#   A = would ship it   B = good   C = meh   D = reject   ? = not rated yet (ignored)
+# Written for this worked example by reading the generated names against the brief's taste rules. In a
+# real project these are yours: rate 40+ names across all four tiers. Names marked [held out] must never
+# appear as examples in a prompt, so `taste --eval` stays an honest test.
+
+vestigome    A   # vestige + -ome: the whole body of traces an image left; real root, says cleanly
+lineadex     A   # lineage + -dex: an index of lines of descent; reads like a reference work
+stemmagram   A   # stemma (a family tree of copies) + -gram; the field term made into a chart [held out]
+substemma    B   # beneath the family tree; dignified but a little abstract
+progeneme    B   # progeny + -eme: one step of descent; clean, the split pro-gen-eme is slightly odd
+lacunagram   B   # lacuna + -gram: a chart of the gaps; true story, but names one feature
+lacunome     B   # the whole set of gaps; good root, the gap reading is narrow [held out]
+diffusome    B   # diffuse + -ome: everything one image spread into; physics ring
+stemome      B   # stem + -ome; plain root, the eye may split stem-ome
+propagram    B   # propagate + -gram; propa- is clipped [held out]
+anteframe    C   # ante + frame; a plain compound, less like a term
+antestem     C   # reads a little like a dental term
+retrodatum   C   # retro + datum; stiff, datum is singular
+protoseme    C   # seme must be looked up
+varigram     C   # generic; variance and statistics come first
+primotype    C   # too close to prototype [held out]
+tropogram    C   # trope reads as rhetoric
+orphaneme    C   # names the dead end, not the tree
+captogram    C   # capt- is vague
+stockome     C   # stock reads as finance first
+tracteme     C   # tract reads as land or a pamphlet [held out]
+primordeme   D   # heavy; -eme sits badly on primord-
+rooteme      D   # sounds like rooty; the ending is bolted on
+hiatome      D   # sounds like a surgical instrument
+ductome      D   # plumbing or anatomy
+matcheme     D   # plain English root with a linguistics ending
+archepost    D   # -post is bolted on
+pedeme       D   # ped- reads as feet, -eme adds nothing [held out]
+gapome       D   # two soft halves
+nultrace     D   # names the dead end; null reads as code
+traceend     D   # two plain words, stress falls flat
+midcopy      D   # a feature label, not a name

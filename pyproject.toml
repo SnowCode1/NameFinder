@@ -1,8 +1,17 @@
 [project]
 name = "namefinder"
 version = "0.1.0"
-description = "Resumable pipeline that discovers and clears an original single-word brand name."
+description = "Find a coined brand name: idea-first generation, LLM tournament ranking, domain and trademark screening."
+readme = "README.md"
+license = {text = "MIT"}
 requires-python = ">=3.10"
+keywords = ["naming", "branding", "llm", "plackett-luce", "rdap", "trademark"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Environment :: Console",
+    "Topic :: Text Processing :: Linguistic",
+]
 dependencies = [
     "wordfreq>=3.1.1",
     "nltk>=3.8",
